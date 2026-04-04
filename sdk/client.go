@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"time"
 
+
 	"github.com/cloudwego/hertz/pkg/app/client"
 	"github.com/cloudwego/hertz/pkg/protocol"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
@@ -80,6 +81,11 @@ func (c *Client) GetToken() string {
 
 // request makes an HTTP request and decodes the response
 func (c *Client) request(ctx context.Context, method, path string, body any, result any) error {
+	_, err := c.requestWithMeta(ctx, method, path, body, result)
+	return err
+}
+
+func (c *Client) requestWithMeta(ctx context.Context, method, path string, body any, result any) (map[string]any, error) {
 	reqURL := c.baseURL + path
 
 	req := &protocol.Request{}
@@ -96,43 +102,26 @@ func (c *Client) request(ctx context.Context, method, path string, body any, res
 	if body != nil {
 		jsonBody, err := json.Marshal(body)
 		if err != nil {
-			return fmt.Errorf("failed to marshal request body: %w", err)
+			return nil, fmt.Errorf("failed to marshal request body: %w", err)
 		}
 		req.SetBody(jsonBody)
 	}
 
 	err := c.httpClient.Do(ctx, req, resp)
 	if err != nil {
-		return fmt.Errorf("failed to send request: %w", err)
+		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
 
-	// Decode response
-	var apiResp Response
-	if err := json.Unmarshal(resp.Body(), &apiResp); err != nil {
-		return fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	// Check for API error
-	if apiResp.Code != 0 {
-		return &Error{Code: apiResp.Code, Msg: apiResp.Msg}
-	}
-
-	// Decode data if result is provided
-	if result != nil && apiResp.Data != nil {
-		dataBytes, err := json.Marshal(apiResp.Data)
-		if err != nil {
-			return fmt.Errorf("failed to marshal response data: %w", err)
-		}
-		if err := json.Unmarshal(dataBytes, result); err != nil {
-			return fmt.Errorf("failed to decode response data: %w", err)
-		}
-	}
-
-	return nil
+	return decodeAPIResponse(resp.Body(), result)
 }
 
 // get makes a GET request with query parameters
 func (c *Client) get(ctx context.Context, path string, params map[string]string, result any) error {
+	_, err := c.getWithMeta(ctx, path, params, result)
+	return err
+}
+
+func (c *Client) getWithMeta(ctx context.Context, path string, params map[string]string, result any) (map[string]any, error) {
 	reqURL := c.baseURL + path
 	if len(params) > 0 {
 		query := url.Values{}
@@ -154,37 +143,42 @@ func (c *Client) get(ctx context.Context, path string, params map[string]string,
 
 	err := c.httpClient.Do(ctx, req, resp)
 	if err != nil {
-		return fmt.Errorf("failed to send request: %w", err)
+		return nil, fmt.Errorf("failed to send request: %w", err)
 	}
 
-	// Decode response
+	return decodeAPIResponse(resp.Body(), result)
+}
+
+func decodeAPIResponse(body []byte, result any) (map[string]any, error) {
 	var apiResp Response
-	if err = json.Unmarshal(resp.Body(), &apiResp); err != nil {
-		return fmt.Errorf("failed to decode response: %w", err)
+	if err := json.Unmarshal(body, &apiResp); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
-	// Check for API error
 	if apiResp.Code != 0 {
-		return &Error{Code: apiResp.Code, Msg: apiResp.Msg}
+		return nil, &Error{Code: apiResp.Code, Msg: apiResp.ErrorText()}
 	}
 
-	// Decode data if result is provided
 	if result != nil && apiResp.Data != nil {
 		dataBytes, err := json.Marshal(apiResp.Data)
 		if err != nil {
-			return fmt.Errorf("failed to marshal response data: %w", err)
+			return nil, fmt.Errorf("failed to marshal response data: %w", err)
 		}
 		if err := json.Unmarshal(dataBytes, result); err != nil {
-			return fmt.Errorf("failed to decode response data: %w", err)
+			return nil, fmt.Errorf("failed to decode response data: %w", err)
 		}
 	}
 
-	return nil
+	return apiResp.Meta, nil
 }
 
 // post makes a POST request
 func (c *Client) post(ctx context.Context, path string, body interface{}, result interface{}) error {
 	return c.request(ctx, consts.MethodPost, path, body, result)
+}
+
+func (c *Client) postWithMeta(ctx context.Context, path string, body interface{}, result interface{}) (map[string]any, error) {
+	return c.requestWithMeta(ctx, consts.MethodPost, path, body, result)
 }
 
 // put makes a PUT request

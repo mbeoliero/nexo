@@ -4,24 +4,28 @@ import (
 	"context"
 
 	"github.com/mbeoliero/kit/log"
+
 	"github.com/mbeoliero/nexo/internal/entity"
 	"github.com/mbeoliero/nexo/internal/repository"
+	"github.com/mbeoliero/nexo/pkg/constant"
 	"github.com/mbeoliero/nexo/pkg/errcode"
 )
 
 // ConversationService handles conversation-related business logic
 type ConversationService struct {
-	convRepo *repository.ConversationRepo
-	seqRepo  *repository.SeqRepo
-	repos    *repository.Repositories
+	convRepo  *repository.ConversationRepo
+	groupRepo *repository.GroupRepo
+	seqRepo   *repository.SeqRepo
+	repos     *repository.Repositories
 }
 
 // NewConversationService creates a new ConversationService
 func NewConversationService(repos *repository.Repositories) *ConversationService {
 	return &ConversationService{
-		convRepo: repos.Conversation,
-		seqRepo:  repos.Seq,
-		repos:    repos,
+		convRepo:  repos.Conversation,
+		groupRepo: repos.Group,
+		seqRepo:   repos.Seq,
+		repos:     repos,
 	}
 }
 
@@ -65,16 +69,12 @@ func (s *ConversationService) GetConversation(ctx context.Context, userId, conve
 	}
 
 	// Get seq info
-	seqConv, _ := s.seqRepo.GetConversationSeqInfo(ctx, conversationId)
-	seqUser, _ := s.seqRepo.GetSeqUser(ctx, userId, conversationId)
-
-	maxSeq := int64(0)
-	readSeq := int64(0)
-	if seqConv != nil {
-		maxSeq = seqConv.MaxSeq
-	}
-	if seqUser != nil {
-		readSeq = seqUser.ReadSeq
+	seqConv, seqConvErr := s.seqRepo.GetConversationSeqInfo(ctx, conversationId)
+	seqUser, seqUserErr := s.seqRepo.GetSeqUser(ctx, userId, conversationId)
+	maxSeq, readSeq, err := resolveConversationSeqState(seqConv, seqConvErr, seqUser, seqUserErr)
+	if err != nil {
+		log.CtxError(ctx, "get conversation seq state failed: user_id=%s conversation_id=%s err=%v, seqConvErr=%v, seqUserErr=%v", userId, conversationId, err, seqConvErr, seqUserErr)
+		return nil, err
 	}
 
 	unreadCount := maxSeq - readSeq
@@ -94,6 +94,19 @@ func (s *ConversationService) GetConversation(ctx context.Context, userId, conve
 		ReadSeq:          readSeq,
 		UpdatedAt:        conv.UpdatedAt,
 	}, nil
+}
+
+func resolveConversationSeqState(seqConv *entity.SeqConversation, seqConvErr error, seqUser *entity.SeqUser, seqUserErr error) (maxSeq, readSeq int64, err error) {
+	if seqConvErr != nil || seqUserErr != nil {
+		return 0, 0, errcode.ErrInternalServer
+	}
+	if seqConv != nil {
+		maxSeq = seqConv.MaxSeq
+	}
+	if seqUser != nil {
+		readSeq = seqUser.ReadSeq
+	}
+	return maxSeq, readSeq, nil
 }
 
 // UpdateConversationRequest represents update conversation request
@@ -126,6 +139,9 @@ func (s *ConversationService) UpdateConversation(ctx context.Context, userId, co
 
 // MarkRead marks a conversation as read up to a seq
 func (s *ConversationService) MarkRead(ctx context.Context, userId, conversationId string, readSeq int64) error {
+	if err := s.ensureConversationAccess(ctx, userId, conversationId); err != nil {
+		return err
+	}
 	if err := s.seqRepo.UpdateReadSeq(ctx, userId, conversationId, readSeq); err != nil {
 		log.CtxError(ctx, "update read seq failed: %v", err)
 		return errcode.ErrInternalServer
@@ -135,15 +151,64 @@ func (s *ConversationService) MarkRead(ctx context.Context, userId, conversation
 
 // GetMaxReadSeq gets the max seq and read seq for a conversation
 func (s *ConversationService) GetMaxReadSeq(ctx context.Context, userId, conversationId string) (maxSeq, readSeq int64, err error) {
-	seqConv, err := s.seqRepo.GetConversationSeqInfo(ctx, conversationId)
-	if err != nil {
+	if err := s.ensureConversationAccess(ctx, userId, conversationId); err != nil {
 		return 0, 0, err
 	}
+	seqConv, err := s.seqRepo.GetConversationSeqInfo(ctx, conversationId)
+	if err != nil {
+		log.CtxError(ctx, "get conversation seq failed: user_id=%s conversation_id=%s err=%v", userId, conversationId, err)
+		return 0, 0, errcode.ErrInternalServer
+	}
 
-	seqUser, _ := s.seqRepo.GetSeqUser(ctx, userId, conversationId)
+	seqUser, err := s.seqRepo.GetSeqUser(ctx, userId, conversationId)
+	if err != nil {
+		log.CtxError(ctx, "get user seq failed: user_id=%s conversation_id=%s err=%v", userId, conversationId, err)
+		return 0, 0, errcode.ErrInternalServer
+	}
 	if seqUser != nil {
 		readSeq = seqUser.ReadSeq
 	}
 
 	return seqConv.MaxSeq, readSeq, nil
+}
+
+func (s *ConversationService) ensureConversationAccess(ctx context.Context, userId, conversationId string) error {
+	hasAccess, err := s.checkConversationAccess(ctx, userId, conversationId)
+	if err != nil {
+		log.CtxError(ctx, "check conversation access failed: user_id=%s conversation_id=%s err=%v", userId, conversationId, err)
+		return errcode.ErrInternalServer
+	}
+	if !hasAccess {
+		return errcode.ErrNoPermission
+	}
+	return nil
+}
+
+func (s *ConversationService) checkConversationAccess(ctx context.Context, userId, conversationId string) (bool, error) {
+	if len(conversationId) < 3 {
+		return false, nil
+	}
+
+	switch conversationId[:3] {
+	case constant.SingleConversationPrefix:
+		if len(conversationId) <= 3 {
+			return false, nil
+		}
+		return containsUserId(conversationId[3:], userId), nil
+	case constant.GroupConversationPrefix:
+		if s.groupRepo == nil {
+			return false, errcode.ErrInternalServer
+		}
+		member, err := s.groupRepo.GetMember(ctx, conversationId[3:], userId)
+		found, err := resolveGroupMembershipLookup(err)
+		if err != nil {
+			return false, err
+		}
+		if !found {
+			return false, nil
+		}
+		return member.IsNormal(), nil
+	default:
+		return false, nil
+	}
 }

@@ -32,15 +32,29 @@ type WebsocketClientConn struct {
 }
 
 // NewWebSocketClientConn creates a new websocket client connection
-func NewWebSocketClientConn(conn *websocket.Conn, maxMsgSize int64, pongWait, pingPeriod time.Duration) *WebsocketClientConn {
+func NewWebSocketClientConn(
+	conn *websocket.Conn,
+	maxMsgSize int64,
+	writeWait time.Duration,
+	pongWait time.Duration,
+	pingPeriod time.Duration,
+	writeChannelSize int,
+) *WebsocketClientConn {
+	if writeChannelSize <= 0 {
+		writeChannelSize = 256
+	}
 	c := &WebsocketClientConn{
 		conn:       conn,
-		writeChan:  make(chan []byte, 256), // Buffered write channel
+		writeChan:  make(chan []byte, writeChannelSize),
 		closeChan:  make(chan struct{}),
 		pingPeriod: pingPeriod,
 		pongWait:   pongWait,
-		writeWait:  WriteWait,
+		writeWait:  writeWait,
 		maxMsgSize: maxMsgSize,
+	}
+
+	if conn == nil {
+		return c
 	}
 
 	// Set read limit
@@ -124,10 +138,14 @@ func (c *WebsocketClientConn) Close() error {
 	c.closeOnce.Do(func() {
 		c.writeMu.Lock()
 		c.closed = true
-		close(c.writeChan)
+		if c.writeChan != nil {
+			close(c.writeChan)
+		}
 		c.writeMu.Unlock()
 
-		close(c.closeChan)
+		if c.closeChan != nil {
+			close(c.closeChan)
+		}
 	})
 	return nil
 }

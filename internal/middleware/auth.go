@@ -12,6 +12,8 @@ import (
 	"github.com/mbeoliero/nexo/pkg/response"
 )
 
+var nativeTokenStateValidator func(context.Context, *jwt.Claims, string) error
+
 const (
 	// AuthorizationHeader is the header key for authorization
 	AuthorizationHeader = "Authorization"
@@ -40,9 +42,9 @@ func JWTAuth() app.HandlerFunc {
 		}
 
 		tokenString := strings.TrimPrefix(authHeader, BearerPrefix)
-		claims, err := ParseTokenWithFallback(tokenString, config.GlobalConfig)
+		claims, err := ParseTokenWithFallback(ctx, tokenString, config.GlobalConfig)
 		if err != nil {
-			response.ErrorWithCode(ctx, c, errcode.ErrTokenInvalid)
+			response.Error(ctx, c, err)
 			c.Abort()
 			return
 		}
@@ -55,11 +57,24 @@ func JWTAuth() app.HandlerFunc {
 	}
 }
 
+func SetNativeTokenStateValidator(validator func(context.Context, *jwt.Claims, string) error) {
+	nativeTokenStateValidator = validator
+}
+
 // ParseTokenWithFallback tries nexo token first, then falls back to external token if enabled.
-func ParseTokenWithFallback(tokenString string, cfg *config.Config) (*jwt.Claims, error) {
+func ParseTokenWithFallback(ctx context.Context, tokenString string, cfg *config.Config) (*jwt.Claims, error) {
+	if cfg == nil {
+		return nil, errcode.ErrInternalServer
+	}
+
 	// Try nexo native token first
 	claims, err := jwt.ParseToken(tokenString, cfg.JWT.Secret)
 	if err == nil {
+		if nativeTokenStateValidator != nil {
+			if err := nativeTokenStateValidator(ctx, claims, tokenString); err != nil {
+				return nil, err
+			}
+		}
 		return claims, nil
 	}
 

@@ -41,10 +41,37 @@ func (c *Client) GetUsersInfo(ctx context.Context, userIds []string) ([]*UserInf
 
 // GetUsersOnlineStatus gets online status for multiple users
 func (c *Client) GetUsersOnlineStatus(ctx context.Context, userIds []string) ([]*OnlineStatus, error) {
-	var result []*OnlineStatus
-	req := &GetUsersOnlineStatusRequest{UserIds: userIds}
-	if err := c.post(ctx, "/user/get_users_online_status", req, &result); err != nil {
+	result, err := c.GetUsersOnlineStatusResult(ctx, userIds)
+	if err != nil {
 		return nil, err
 	}
-	return result, nil
+	statuses := make([]*OnlineStatus, 0, len(result.Users))
+	for _, item := range result.Users {
+		if item == nil {
+			continue
+		}
+		status := &OnlineStatus{
+			UserId: item.UserId,
+			Status: item.Status,
+		}
+		if len(item.DetailPlatformStatus) > 0 && item.DetailPlatformStatus[0] != nil {
+			status.Platform = item.DetailPlatformStatus[0].PlatformName
+		}
+		statuses = append(statuses, status)
+	}
+	return statuses, nil
+}
+
+// GetUsersOnlineStatusResult gets online status with detailed platform info and response metadata.
+func (c *Client) GetUsersOnlineStatusResult(ctx context.Context, userIds []string) (*UsersOnlineStatusResult, error) {
+	var users []*OnlineStatusResult
+	req := &GetUsersOnlineStatusRequest{UserIds: userIds}
+	meta, err := c.postWithMeta(ctx, "/user/get_users_online_status", req, &users)
+	if err != nil {
+		return nil, err
+	}
+	return &UsersOnlineStatusResult{
+		Users: users,
+		Meta:  meta,
+	}, nil
 }

@@ -15,7 +15,10 @@ type Response struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
 	Data    any    `json:"data,omitempty"`
+	Meta    Meta   `json:"meta,omitempty"`
 }
+
+type Meta map[string]any
 
 // Success sends a success response
 func Success(ctx context.Context, c *app.RequestContext, data any) {
@@ -26,18 +29,30 @@ func Success(ctx context.Context, c *app.RequestContext, data any) {
 	})
 }
 
+// SuccessWithMeta sends a success response and attaches extra metadata.
+func SuccessWithMeta(ctx context.Context, c *app.RequestContext, data any, meta Meta) {
+	c.JSON(http.StatusOK, Response{
+		Code:    0,
+		Message: "success",
+		Data:    data,
+		Meta:    meta,
+	})
+}
+
 // Error sends an error response
 func Error(ctx context.Context, c *app.RequestContext, err error) {
 	var code int
 	var msg string
+	statusCode := http.StatusOK
 
 	var e *errcode.Error
 	if errors.As(err, &e) {
 		code = e.Code
 		msg = e.Msg
+		statusCode = errorStatusCode(e)
 	}
 
-	c.JSON(http.StatusOK, Response{
+	c.JSON(statusCode, Response{
 		Code:    code,
 		Message: msg,
 	})
@@ -45,7 +60,7 @@ func Error(ctx context.Context, c *app.RequestContext, err error) {
 
 // ErrorWithCode sends an error response with specific error code
 func ErrorWithCode(ctx context.Context, c *app.RequestContext, e *errcode.Error) {
-	c.JSON(http.StatusOK, Response{
+	c.JSON(errorStatusCode(e), Response{
 		Code:    e.Code,
 		Message: e.Msg,
 	})
@@ -71,4 +86,14 @@ func Forbidden(ctx context.Context, c *app.RequestContext, msg string) {
 		Code:    errcode.ErrForbidden.Code,
 		Message: msg,
 	})
+}
+
+func errorStatusCode(err *errcode.Error) int {
+	if err == nil {
+		return http.StatusOK
+	}
+	if err.Code == errcode.ErrServerShuttingDown.Code {
+		return http.StatusServiceUnavailable
+	}
+	return http.StatusOK
 }

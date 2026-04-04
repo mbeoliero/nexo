@@ -2,14 +2,16 @@ package service
 
 import (
 	"context"
+	"errors"
 
 	"github.com/mbeoliero/kit/log"
+	"gorm.io/gorm"
+
 	"github.com/mbeoliero/nexo/internal/entity"
 	"github.com/mbeoliero/nexo/internal/repository"
 	"github.com/mbeoliero/nexo/pkg/constant"
 	"github.com/mbeoliero/nexo/pkg/errcode"
 	"github.com/mbeoliero/nexo/pkg/idgen"
-	"gorm.io/gorm"
 )
 
 // GroupService handles group-related business logic
@@ -129,7 +131,7 @@ func (s *GroupService) JoinGroup(ctx context.Context, groupId, userId, inviterId
 		// Check if group exists and is normal
 		group, err := s.groupRepo.GetByIdWithTx(ctx, tx, groupId)
 		if err != nil {
-			return errcode.ErrGroupNotFound
+			return classifyGroupLookupError(err)
 		}
 		if !group.IsNormal() {
 			return errcode.ErrGroupDismissed
@@ -137,7 +139,7 @@ func (s *GroupService) JoinGroup(ctx context.Context, groupId, userId, inviterId
 
 		// Check if already a member
 		existingMember, err := s.groupRepo.GetMemberWithTx(ctx, tx, groupId, userId)
-		if err != nil && err != gorm.ErrRecordNotFound {
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
 		if existingMember != nil && existingMember.IsNormal() {
@@ -146,7 +148,7 @@ func (s *GroupService) JoinGroup(ctx context.Context, groupId, userId, inviterId
 
 		// Lock seq_conversations row and get max_seq
 		maxSeq, err := s.seqRepo.GetMaxSeqWithLock(ctx, tx, conversationId)
-		if err != nil && err != gorm.ErrRecordNotFound {
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
 
@@ -198,7 +200,7 @@ func (s *GroupService) QuitGroup(ctx context.Context, groupId, userId string) er
 		// Check if user is a member
 		member, err := s.groupRepo.GetMemberWithTx(ctx, tx, groupId, userId)
 		if err != nil {
-			return errcode.ErrNotGroupMember
+			return classifyGroupMemberLookupError(err)
 		}
 		if !member.IsNormal() {
 			return errcode.ErrNotGroupMember
@@ -244,7 +246,7 @@ func (s *GroupService) QuitGroup(ctx context.Context, groupId, userId string) er
 func (s *GroupService) GetGroupInfo(ctx context.Context, groupId string) (*entity.GroupInfo, error) {
 	group, err := s.groupRepo.GetById(ctx, groupId)
 	if err != nil {
-		return nil, errcode.ErrGroupNotFound
+		return nil, classifyGroupLookupError(err)
 	}
 
 	memberCount, err := s.groupRepo.GetMemberCount(ctx, groupId)
@@ -278,6 +280,20 @@ func (s *GroupService) GetGroupMembers(ctx context.Context, groupId string) ([]*
 // GetActiveMemberUserIds gets active member user Ids
 func (s *GroupService) GetActiveMemberUserIds(ctx context.Context, groupId string) ([]string, error) {
 	return s.groupRepo.GetActiveMemberUserIds(ctx, groupId)
+}
+
+func classifyGroupLookupError(err error) error {
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return errcode.ErrGroupNotFound
+	}
+	return errcode.ErrInternalServer
+}
+
+func classifyGroupMemberLookupError(err error) error {
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return errcode.ErrNotGroupMember
+	}
+	return errcode.ErrInternalServer
 }
 
 // IsActiveMember checks if user is an active member

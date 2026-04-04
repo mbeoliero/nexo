@@ -2,6 +2,7 @@ server:
   http_port: 8080
   ws_port: 8080
   mode: debug  # debug, release
+  ready_detail_enabled: false
   # Allowed origins for WebSocket CORS validation
   # Use "*" only in development, specify exact origins in production
   allowed_origins:
@@ -34,7 +35,7 @@ external_jwt:
   enabled: false
   secret: "your-external-system-secret"
   default_role: "user"      # "user" or "agent"
-  default_platform_id: 1    # Web
+  default_platform_id: 5    # Web
 
 websocket:
   max_conn_num: 10000
@@ -43,3 +44,22 @@ websocket:
   pong_wait: 30s
   ping_period: 27s
   push_channel_size: 10000
+  push_worker_num: 10
+  write_channel_size: 256
+  # Default to trusting the authenticated token's platform_id. Only enable this
+  # when a trusted integration must override platform_id at the websocket edge.
+  allow_platform_id_override: false
+
+cross_instance:
+  enabled: false
+  # Leave instance_id empty by default so multi-instance deployments must provide
+  # a node-unique value explicitly; main.go will generate a UUID when omitted.
+  heartbeat_second: 10
+  route_ttl_seconds: 90
+  instance_alive_ttl_seconds: 30
+  reconcile_interval_seconds: 30
+  drain_timeout_seconds: 30
+  drain_routeable_grace_seconds: 5
+  subscription_channel_size: 1024
+  subscription_send_timeout: 5s
+  max_refs_per_envelope: 500

@@ -2,11 +2,13 @@ package service
 
 import (
 	"context"
+	"errors"
 
 	"github.com/google/uuid"
 	"github.com/mbeoliero/kit/log"
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
 
 	"github.com/mbeoliero/nexo/internal/config"
 	"github.com/mbeoliero/nexo/internal/entity"
@@ -99,8 +101,13 @@ func (s *AuthService) Login(ctx context.Context, req *LoginRequest) (*LoginRespo
 	// Get user
 	user, err := s.userRepo.GetById(ctx, req.UserId)
 	if err != nil {
-		log.CtxDebug(ctx, "user not found: user_id=%s, error=%v", req.UserId, err)
-		return nil, errcode.ErrUserNotFound
+		mappedErr := classifyLoginLookupError(err)
+		if errors.Is(mappedErr, errcode.ErrUserNotFound) {
+			log.CtxDebug(ctx, "user not found: user_id=%s, error=%v", req.UserId, err)
+		} else {
+			log.CtxError(ctx, "get user failed during login: user_id=%s, error=%v", req.UserId, err)
+		}
+		return nil, mappedErr
 	}
 
 	// Verify password with bcrypt
@@ -137,24 +144,37 @@ func (s *AuthService) Login(ctx context.Context, req *LoginRequest) (*LoginRespo
 	}, nil
 }
 
+func classifyLoginLookupError(err error) error {
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return errcode.ErrUserNotFound
+	}
+	return errcode.ErrInternalServer
+}
+
+func (s *AuthService) ValidateIssuedToken(ctx context.Context, claims *jwt.Claims, token string) error {
+	if claims == nil {
+		return errcode.ErrTokenInvalid
+	}
+	valid, err := s.tokenStore.IsTokenValid(ctx, claims.UserId, claims.PlatformId, token)
+	if err != nil {
+		log.CtxWarn(ctx, "check token status failed: %v", err)
+		return errcode.ErrInternalServer
+	}
+	if !valid {
+		return errcode.ErrTokenInvalid
+	}
+	return nil
+}
+
 // ValidateToken validates a token and returns claims
 func (s *AuthService) ValidateToken(ctx context.Context, token string) (*jwt.Claims, error) {
 	claims, err := jwt.ParseToken(token, s.cfg.JWT.Secret)
 	if err != nil {
 		return nil, err
 	}
-
-	// Check token status in Redis
-	valid, err := s.tokenStore.IsTokenValid(ctx, claims.UserId, claims.PlatformId, token)
-	if err != nil {
-		log.CtxWarn(ctx, "check token status failed: %v", err)
-		// Fall back to JWT validation only if Redis check fails
-		return claims, nil
+	if err := s.ValidateIssuedToken(ctx, claims, token); err != nil {
+		return nil, err
 	}
-	if !valid {
-		return nil, errcode.ErrTokenInvalid
-	}
-
 	return claims, nil
 }
 
@@ -164,18 +184,9 @@ func (s *AuthService) ValidateTokenWithUser(ctx context.Context, token, userId s
 	if err != nil {
 		return nil, err
 	}
-
-	// Check token status in Redis
-	valid, err := s.tokenStore.IsTokenValid(ctx, claims.UserId, claims.PlatformId, token)
-	if err != nil {
-		log.CtxWarn(ctx, "check token status failed: %v", err)
-		// Fall back to JWT validation only if Redis check fails
-		return claims, nil
+	if err := s.ValidateIssuedToken(ctx, claims, token); err != nil {
+		return nil, err
 	}
-	if !valid {
-		return nil, errcode.ErrTokenInvalid
-	}
-
 	return claims, nil
 }
 

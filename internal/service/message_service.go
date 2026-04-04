@@ -281,17 +281,11 @@ func (s *MessageService) PullMessages(ctx context.Context, userId string, req *P
 	}
 
 	// Get user's visible range for this conversation
-	seqUser, _ := s.seqRepo.GetSeqUser(ctx, userId, req.ConversationId)
-
-	beginSeq := req.BeginSeq
-	endSeq := req.EndSeq
-	if endSeq == 0 {
-		endSeq = convSeq.MaxSeq
-	}
-
-	// Apply user's visible range constraints
-	if seqUser != nil {
-		beginSeq, endSeq = seqUser.ClampSeqRange(beginSeq, endSeq, convSeq.MaxSeq)
+	seqUser, seqUserErr := s.seqRepo.GetSeqUser(ctx, userId, req.ConversationId)
+	beginSeq, endSeq, err := resolvePullRange(req.BeginSeq, req.EndSeq, convSeq.MaxSeq, seqUser, seqUserErr)
+	if err != nil {
+		log.CtxError(ctx, "get user visible seq range failed: user_id=%s conversation_id=%s err=%v", userId, req.ConversationId, err)
+		return nil, 0, err
 	}
 
 	// Validate range
@@ -314,6 +308,19 @@ func (s *MessageService) PullMessages(ctx context.Context, userId string, req *P
 	return messages, convSeq.MaxSeq, nil
 }
 
+func resolvePullRange(beginSeq, endSeq, convMaxSeq int64, seqUser *entity.SeqUser, seqUserErr error) (int64, int64, error) {
+	if seqUserErr != nil {
+		return 0, 0, errcode.ErrInternalServer
+	}
+	if endSeq == 0 {
+		endSeq = convMaxSeq
+	}
+	if seqUser != nil {
+		beginSeq, endSeq = seqUser.ClampSeqRange(beginSeq, endSeq, convMaxSeq)
+	}
+	return beginSeq, endSeq, nil
+}
+
 // checkConversationAccess verifies if a user has access to a conversation
 func (s *MessageService) checkConversationAccess(ctx context.Context, userId, conversationId string) (bool, error) {
 	// Parse conversation Id to determine type
@@ -323,11 +330,11 @@ func (s *MessageService) checkConversationAccess(ctx context.Context, userId, co
 
 	prefix := conversationId[:3]
 	switch prefix {
-	case "si_":
+	case constant.SingleConversationPrefix:
 		// Single chat: si_{userA}_{userB}
 		// User must be one of the participants
 		return s.checkSingleChatAccess(userId, conversationId), nil
-	case "sg_":
+	case constant.GroupConversationPrefix:
 		// Group chat: sg_{groupId}
 		// User must be an active member of the group
 		groupId := conversationId[3:]
@@ -352,12 +359,25 @@ func (s *MessageService) checkSingleChatAccess(userId, conversationId string) bo
 // checkGroupChatAccess checks if user is an active member of the group
 func (s *MessageService) checkGroupChatAccess(ctx context.Context, userId, groupId string) (bool, error) {
 	member, err := s.groupRepo.GetMember(ctx, groupId, userId)
+	found, err := resolveGroupMembershipLookup(err)
 	if err != nil {
-		// User is not a member
+		return false, err
+	}
+	if !found {
 		return false, nil
 	}
 	// User must be an active member (not quit/kicked)
 	return member.IsNormal(), nil
+}
+
+func resolveGroupMembershipLookup(err error) (bool, error) {
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return false, nil
+	}
+	return false, err
 }
 
 // containsUserId checks if userId is part of the conversation participants string

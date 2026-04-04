@@ -2,9 +2,18 @@ package sdk
 
 // Response represents the standard API response
 type Response struct {
-	Code int         `json:"code"`
-	Msg  string      `json:"msg"`
-	Data interface{} `json:"data,omitempty"`
+	Code    int            `json:"code"`
+	Msg     string         `json:"msg,omitempty"`
+	Message string         `json:"message,omitempty"`
+	Data    interface{}    `json:"data,omitempty"`
+	Meta    map[string]any `json:"meta,omitempty"`
+}
+
+func (r Response) ErrorText() string {
+	if r.Message != "" {
+		return r.Message
+	}
+	return r.Msg
 }
 
 // UserInfo represents public user info
@@ -87,6 +96,23 @@ type OnlineStatus struct {
 	UserId   string `json:"user_id"`
 	Status   int    `json:"status"`
 	Platform string `json:"platform,omitempty"`
+}
+
+type PlatformStatusDetail struct {
+	PlatformId   int    `json:"platform_id"`
+	PlatformName string `json:"platform_name"`
+	ConnId       string `json:"conn_id"`
+}
+
+type OnlineStatusResult struct {
+	UserId               string                  `json:"user_id"`
+	Status               int                     `json:"status"`
+	DetailPlatformStatus []*PlatformStatusDetail `json:"detail_platform_status,omitempty"`
+}
+
+type UsersOnlineStatusResult struct {
+	Users []*OnlineStatusResult
+	Meta  map[string]any
 }
 
 // ===== Request types =====

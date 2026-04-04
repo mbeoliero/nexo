@@ -4,25 +4,28 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/mbeoliero/nexo/pkg/constant"
 	"github.com/spf13/viper"
 )
 
 // Config holds all configuration
 type Config struct {
-	Server      ServerConfig      `mapstructure:"server"`
-	MySQL       MySQLConfig       `mapstructure:"mysql"`
-	Redis       RedisConfig       `mapstructure:"redis"`
-	JWT         JWTConfig         `mapstructure:"jwt"`
-	ExternalJWT ExternalJWTConfig `mapstructure:"external_jwt"`
-	WebSocket   WebSocketConfig   `mapstructure:"websocket"`
+	Server        ServerConfig        `mapstructure:"server"`
+	MySQL         MySQLConfig         `mapstructure:"mysql"`
+	Redis         RedisConfig         `mapstructure:"redis"`
+	JWT           JWTConfig           `mapstructure:"jwt"`
+	ExternalJWT   ExternalJWTConfig   `mapstructure:"external_jwt"`
+	WebSocket     WebSocketConfig     `mapstructure:"websocket"`
+	CrossInstance CrossInstanceConfig `mapstructure:"cross_instance"`
 }
 
 // ServerConfig holds server configuration
 type ServerConfig struct {
-	HTTPPort       int      `mapstructure:"http_port"`
-	WSPort         int      `mapstructure:"ws_port"`
-	Mode           string   `mapstructure:"mode"`
-	AllowedOrigins []string `mapstructure:"allowed_origins"`
+	HTTPPort           int      `mapstructure:"http_port"`
+	WSPort             int      `mapstructure:"ws_port"`
+	Mode               string   `mapstructure:"mode"`
+	AllowedOrigins     []string `mapstructure:"allowed_origins"`
+	ReadyDetailEnabled bool     `mapstructure:"ready_detail_enabled"`
 }
 
 // MySQLConfig holds MySQL configuration
@@ -73,14 +76,29 @@ type ExternalJWTConfig struct {
 
 // WebSocketConfig holds WebSocket configuration
 type WebSocketConfig struct {
-	MaxConnNum       int64         `mapstructure:"max_conn_num"`
-	MaxMessageSize   int64         `mapstructure:"max_message_size"`
-	WriteWait        time.Duration `mapstructure:"write_wait"`
-	PongWait         time.Duration `mapstructure:"pong_wait"`
-	PingPeriod       time.Duration `mapstructure:"ping_period"`
-	PushChannelSize  int           `mapstructure:"push_channel_size"`
-	PushWorkerNum    int           `mapstructure:"push_worker_num"`
-	WriteChannelSize int           `mapstructure:"write_channel_size"`
+	MaxConnNum              int64         `mapstructure:"max_conn_num"`
+	MaxMessageSize          int64         `mapstructure:"max_message_size"`
+	WriteWait               time.Duration `mapstructure:"write_wait"`
+	PongWait                time.Duration `mapstructure:"pong_wait"`
+	PingPeriod              time.Duration `mapstructure:"ping_period"`
+	PushChannelSize         int           `mapstructure:"push_channel_size"`
+	PushWorkerNum           int           `mapstructure:"push_worker_num"`
+	WriteChannelSize        int           `mapstructure:"write_channel_size"`
+	AllowPlatformIDOverride bool          `mapstructure:"allow_platform_id_override"`
+}
+
+type CrossInstanceConfig struct {
+	Enabled                    bool          `mapstructure:"enabled"`
+	InstanceId                 string        `mapstructure:"instance_id"`
+	HeartbeatSecond            int           `mapstructure:"heartbeat_second"`
+	RouteTTLSeconds            int           `mapstructure:"route_ttl_seconds"`
+	InstanceAliveTTLSeconds    int           `mapstructure:"instance_alive_ttl_seconds"`
+	ReconcileIntervalSeconds   int           `mapstructure:"reconcile_interval_seconds"`
+	DrainTimeoutSeconds        int           `mapstructure:"drain_timeout_seconds"`
+	DrainRouteableGraceSeconds int           `mapstructure:"drain_routeable_grace_seconds"`
+	SubscriptionChannelSize    int           `mapstructure:"subscription_channel_size"`
+	SubscriptionSendTimeout    time.Duration `mapstructure:"subscription_send_timeout"`
+	MaxRefsPerEnvelope         int           `mapstructure:"max_refs_per_envelope"`
 }
 
 // Global config instance
@@ -129,7 +147,7 @@ func Load(configPath string) (*Config, error) {
 		cfg.ExternalJWT.DefaultRole = "user"
 	}
 	if cfg.ExternalJWT.DefaultPlatformId == 0 {
-		cfg.ExternalJWT.DefaultPlatformId = 1 // ios
+		cfg.ExternalJWT.DefaultPlatformId = constant.PlatformIdWeb
 	}
 	if cfg.WebSocket.MaxConnNum == 0 {
 		cfg.WebSocket.MaxConnNum = 10000
@@ -154,6 +172,35 @@ func Load(configPath string) (*Config, error) {
 	}
 	if cfg.WebSocket.WriteChannelSize == 0 {
 		cfg.WebSocket.WriteChannelSize = 256
+	}
+	// CrossInstance defaults are applied even when Enabled=false.
+	// This is intentional: DrainTimeoutSeconds affects single-instance shutdown too.
+	if cfg.CrossInstance.HeartbeatSecond == 0 {
+		cfg.CrossInstance.HeartbeatSecond = 10
+	}
+	if cfg.CrossInstance.RouteTTLSeconds == 0 {
+		cfg.CrossInstance.RouteTTLSeconds = 90
+	}
+	if cfg.CrossInstance.InstanceAliveTTLSeconds == 0 {
+		cfg.CrossInstance.InstanceAliveTTLSeconds = 30
+	}
+	if cfg.CrossInstance.ReconcileIntervalSeconds == 0 {
+		cfg.CrossInstance.ReconcileIntervalSeconds = max(1, cfg.CrossInstance.RouteTTLSeconds/3)
+	}
+	if cfg.CrossInstance.DrainTimeoutSeconds == 0 {
+		cfg.CrossInstance.DrainTimeoutSeconds = 30
+	}
+	if cfg.CrossInstance.DrainRouteableGraceSeconds == 0 {
+		cfg.CrossInstance.DrainRouteableGraceSeconds = 5
+	}
+	if cfg.CrossInstance.SubscriptionChannelSize == 0 {
+		cfg.CrossInstance.SubscriptionChannelSize = 1024
+	}
+	if cfg.CrossInstance.SubscriptionSendTimeout == 0 {
+		cfg.CrossInstance.SubscriptionSendTimeout = 5 * time.Second
+	}
+	if cfg.CrossInstance.MaxRefsPerEnvelope == 0 {
+		cfg.CrossInstance.MaxRefsPerEnvelope = 500
 	}
 
 	GlobalConfig = &cfg
