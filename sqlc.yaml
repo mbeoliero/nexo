@@ -1,0 +1,29 @@
+version: "2"
+sql:
+  - engine: postgresql
+    schema: migrations/postgres
+    queries: internal/store/pgstore/queries
+    gen:
+      go:
+        package: gen
+        out: internal/store/pgstore/gen
+        sql_package: pgx/v5
+        initialisms: []
+        emit_empty_slices: true
+        emit_pointers_for_null_types: true
+        overrides:
+          - db_type: "pg_catalog.timestamptz"
+            go_type: "time.Time"
+          - db_type: "timestamptz"
+            go_type: "time.Time"
+  - engine: postgresql
+    schema: migrations/postgres
+    queries: internal/cache/pg/queries
+    gen:
+      go:
+        package: gen
+        out: internal/cache/pg/gen
+        sql_package: pgx/v5
+        initialisms: []
+        emit_empty_slices: true
+        emit_pointers_for_null_types: true

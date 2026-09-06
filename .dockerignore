@@ -1,0 +1,6 @@
+bin/
+.git/
+.claude/
+*.log
+config/config.yaml
+deploy/.env

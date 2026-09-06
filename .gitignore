@@ -1,0 +1,6 @@
+/nexo
+/bin/
+config/config.yaml
+deploy/.env
+*.log
+.DS_Store

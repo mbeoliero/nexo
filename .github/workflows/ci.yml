@@ -1,0 +1,64 @@
+# `make test` skips every driver whose NEXO_TEST_* env var is absent, so unit-only runs prove
+# nothing about the Store, Bus, Cache or OnlineStore implementations. The integration job is what
+# actually exercises them; keep it required on the default branch.
+name: ci
+
+on:
+  push:
+    branches: [master, dev]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - name: go vet
+        run: go vet ./...
+      - name: staticcheck
+        # Catches the SA class (misused stdlib APIs) that go vet leaves alone.
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@v0.8.1
+          staticcheck ./...
+      - name: go mod tidy is clean
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+      - name: sqlc generated code is clean
+        run: |
+          make sqlc
+          git diff --exit-code -- internal/store/pgstore/gen internal/cache/pg/gen
+          test -z "$(git ls-files --others --exclude-standard -- internal/store/pgstore/gen internal/cache/pg/gen)"
+      - name: test script regressions
+        run: python3 scripts/test-deploy.py
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go test -race ./...
+
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: full matrix (postgres + mysql + redis)
+        run: ./scripts/test-all.sh -race

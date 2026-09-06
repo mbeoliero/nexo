@@ -1,0 +1,75 @@
+# Single-node development profile. Every key here is read by the code (internal/config/config.go);
+# deploy/config.yaml is the clustered profile (bus=redis, cache=redis, online_store=redis).
+# Env override: NEXO_<PATH> with "_" joining levels, e.g. NEXO_DB_DSN, NEXO_AUTH_NATIVE_SECRET.
+# Secrets stay in the environment; the server refuses to start on a committed placeholder.
+node_id: ""                 # empty = hostname
+server:
+  addr: ":8080"
+  trusted_proxies: []       # CIDRs allowed to set X-Forwarded-For; empty = trust nobody (use the peer address)
+db:
+  driver: postgres          # postgres | mysql
+  access: sqlc              # gorm | sqlc (mysql only supports gorm)
+  dsn: "postgres://nexo:nexo@localhost:5432/nexo?sslmode=disable"
+  max_open_conns: 30
+redis:                      # optional; empty addr = not initialised
+  addr: ""
+  password: ""
+  db: 0
+bus:
+  driver: local             # redis | postgres | local
+online_store:
+  driver: db                # db | redis
+  ttl: 60s
+  renew_interval: 20s
+cache:
+  driver: local             # redis | pg | local
+  cleaner_interval: 1m      # pg only
+offline_push:
+  driver: noop              # noop | webhook
+  webhook_url: ""
+  webhook_secret: ""        # required for webhook
+  timeout: 3s
+auth:
+  providers: [native]       # chain order; with platform: [external_jwt] or [external_jwt, native]
+  default_platform_id: 5
+  external_jwt:
+    secrets: []             # env NEXO_AUTH_EXTERNAL_JWT_SECRETS (comma separated)
+    default_role: user
+  native:
+    secret: ""              # required, >=32 bytes; set via env NEXO_AUTH_NATIVE_SECRET, never commit a real one
+    expire_hours: 168
+internal_auth:
+  enabled: false
+  secret: ""            # >=32 bytes; or list several in `secrets` to rotate (old + new both accepted)
+  secrets: []
+  allowed_services: ["my-backend"]
+  max_skew_seconds: 300
+  require_tls: true
+ws:
+  max_frame_bytes: 65536
+  send_queue: 256
+  ping_interval: 30s
+  pong_wait: 75s
+  allowed_origins: []       # WS handshake Origin allow-list; empty = any (browsers do not police WS)
+  deliver_workers: 8        # push fan-out shards, keyed by conversation id
+  deliver_queue: 1024       # per-shard backlog; a full shard drops the push (clients re-pull)
+limits:
+  max_content_bytes: 8192
+  pull_page_max: 100
+  conversation_page_max: 100
+  max_seqs_page_max: 200
+  group_max_members: 500
+  group_member_cache_ttl: 10s
+  ws_conns_per_user: 10
+  ws_conns_per_token: 3
+  ws_conns_per_ip: 50
+  ws_conns_total: 20000
+  ws_frames_per_sec: 20
+  ws_inflight_per_conn: 8
+  message_send_per_min: 120
+  ws_send_bytes_total: 536870912
+  auth_per_ip_per_min: 0    # 0 = off; per-IP cap on /auth/register + /auth/login (bcrypt); nginx limit_req otherwise
+log:
+  redact_paths: ["/api/v1/auth/login", "/api/v1/auth/register"]  # login/register/message-send are always redacted
+  skip_paths: ["/healthz"]  # no access log line at all
+  request_body: false       # true logs the first 512 bytes of each body; IM bodies carry message content

@@ -1,0 +1,20 @@
+# Overlay for the default (Redis) config: adds the redis service and makes the nodes wait for it.
+services:
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      retries: 30
+  nexo1:
+    depends_on:
+      redis:
+        condition: service_healthy
+  nexo2:
+    depends_on:
+      redis:
+        condition: service_healthy
+  nexo3:
+    depends_on:
+      redis:
+        condition: service_healthy
