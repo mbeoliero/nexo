@@ -52,17 +52,18 @@ type Client struct {
 	frames       *rate.Limiter // inbound frames per second, burst 2x; Inf when the limit is 0
 	overRun      int
 
-	// Queue accounting: enqueue, the writer's dequeue and close all take sendMu so bytes counted
-	// in gw.sendBytes are released exactly once, whichever of them wins the race.
+	// Queue accounting: enqueue, the writer's dequeue and close all take sendMu so bytes charged
+	// to budget are released exactly once, whichever of them wins the race.
+	budget  *sendBudget
 	sendMu  sync.Mutex
-	queued  int64 // bytes in send, already counted in gw.sendBytes
+	queued  int64 // bytes in send, already charged to budget
 	closing bool
 }
 
 func (g *Gateway) newClient(id auth.Identity, connId, ip string, conn ClientConn) *Client {
 	c := &Client{
 		Id: connId, Ip: ip, Identity: id,
-		gw: g, conn: conn,
+		gw: g, conn: conn, budget: g.budget,
 		send:     make(chan []byte, g.cfg.Ws.SendQueue),
 		closed:   make(chan struct{}),
 		drain:    make(chan struct{}),
@@ -82,7 +83,7 @@ func (g *Gateway) newClient(id auth.Identity, connId, ip string, conn ClientConn
 		c.queued = 0
 		c.sendMu.Unlock()
 		close(c.closed)
-		g.sendBytes.Add(-leaked) // frames still in the queue will never be written
+		c.budget.release(leaked) // frames still in the queue will never be written
 		g.users.Unregister(c)
 	})
 	c.remove = sync.OnceFunc(func() { g.onlineRemove(c) })
@@ -94,7 +95,7 @@ func (g *Gateway) newClient(id auth.Identity, connId, ip string, conn ClientConn
 // frames, Kick and Resync go through here and are never subject to the node byte cap.
 func (c *Client) Send(frame []byte) error {
 	n := int64(len(frame))
-	c.gw.sendBytes.Add(n)
+	c.budget.take(n)
 	return c.enqueue(frame, n)
 }
 
@@ -102,10 +103,7 @@ func (c *Client) Send(frame []byte) error {
 // push is dropped and replaced by 2004 Resync so the client re-pulls by seq (design §7.3).
 func (c *Client) Push(frame []byte) error {
 	n := int64(len(frame))
-	total := c.gw.sendBytes.Add(n)
-	if limit := c.gw.cfg.Limits.WsSendBytesTotal; limit > 0 && total > limit {
-		c.gw.sendBytes.Add(-n)
-		c.gw.dropped.Add(1)
+	if !c.budget.tryTake(n) {
 		return c.resync(closeReasonOverCap)
 	}
 	return c.enqueue(frame, n)
@@ -115,12 +113,12 @@ func (c *Client) resync(reason string) error {
 	return c.Send(pushFrame(Resync, map[string]string{"reason": reason}))
 }
 
-// enqueue takes ownership of n bytes already added to gw.sendBytes and gives them back on failure.
+// enqueue takes ownership of n bytes already charged to budget and gives them back on failure.
 func (c *Client) enqueue(frame []byte, n int64) error {
 	c.sendMu.Lock()
 	if c.closing {
 		c.sendMu.Unlock()
-		c.gw.sendBytes.Add(-n)
+		c.budget.release(n)
 		return errcode.ErrConnClosed
 	}
 	select {
@@ -130,8 +128,8 @@ func (c *Client) enqueue(frame []byte, n int64) error {
 		return nil
 	default:
 		c.sendMu.Unlock()
-		c.gw.sendBytes.Add(-n)
-		c.gw.slowConsumers.Add(1)
+		c.budget.release(n)
+		c.budget.slowConsumers.Add(1)
 		c.Close(closeReasonSlow)
 		return errcode.ErrConnClosed.WithMessage("send queue full")
 	}
@@ -156,11 +154,11 @@ func (c *Client) ctx() context.Context { return c.connCtx }
 
 // Serve runs both loops and returns when the connection is gone.
 func (c *Client) Serve() {
-	if !c.gw.beginWork() {
+	if !c.gw.work.begin() {
 		c.Close(closeReasonServer)
 		return
 	}
-	defer c.gw.work.Done()
+	defer c.gw.work.done()
 	var wg sync.WaitGroup
 	wg.Go(c.writeLoop)
 	wg.Go(c.recheckLoop)
@@ -207,7 +205,7 @@ func (c *Client) write(frame []byte) bool {
 	c.sendMu.Lock()
 	if !c.closing { // after close the accounting was already released in one piece
 		c.queued -= n
-		c.gw.sendBytes.Add(-n)
+		c.budget.release(n)
 	}
 	c.sendMu.Unlock()
 	_ = c.conn.SetWriteDeadline(time.Now().Add(writeWait))
@@ -227,14 +225,21 @@ func (c *Client) readLoop() {
 			if !errors.Is(err, errcode.ErrConnClosed) {
 				log.CtxDebug(c.ctx(), "ws read: %v", err)
 			}
+			c.awaitDrain()
 			return
 		}
 		if !c.admit(raw) {
-			if c.draining.Load() {
-				<-c.closed // writer or the overall drain deadline owns the close
-			}
+			c.awaitDrain()
 			return
 		}
+	}
+}
+
+// awaitDrain keeps readLoop from closing the socket under the writer once draining has started
+// (design §7.3): the writer, or finishDrain's deadline, owns that close.
+func (c *Client) awaitDrain() {
+	if c.draining.Load() {
+		<-c.closed
 	}
 }
 
@@ -265,12 +270,12 @@ func (c *Client) admit(raw []byte) bool {
 		return c.overLimit(req)
 	}
 	c.overRun = 0
-	if !c.gw.beginWork() {
+	if !c.gw.work.begin() {
 		<-c.inflight
 		return false
 	}
 	go func() {
-		defer c.gw.work.Done()
+		defer c.gw.work.done()
 		defer func() {
 			<-c.inflight
 			if r := recover(); r != nil {
@@ -286,7 +291,7 @@ func (c *Client) admit(raw []byte) bool {
 
 func (c *Client) overLimit(req Request) bool {
 	c.overRun++
-	c.gw.rateLimited.Add(1)
+	c.budget.rateLimited.Add(1)
 	_ = c.Send(req.fail(errcode.ErrTooManyRequests))
 	if c.overRun >= overLimitCloseAt {
 		c.Close(closeReasonRate)

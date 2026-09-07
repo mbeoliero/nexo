@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -56,6 +57,28 @@ func TestKickFlushesQueuedFramesFirst(t *testing.T) {
 		t.Fatalf("queued frame must be flushed before 2002: %+v", r)
 	}
 	expectKick(t, f, KickNewLogin)
+}
+
+// A peer reset while draining must not let readLoop hard-close under the writer: the queued
+// frames and the 2002 still go out (design §7.3), bounded by finishDrain's deadline.
+func TestReadErrorDuringDrainKeepsWriterClosing(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		g := newGateway(t, testConfig())
+		f := newFakeConn()
+		f.out = make(chan []byte) // unbuffered: the writer parks on the first frame until the test reads it
+		c := serveConn(t, g, auth.Identity{UserId: "u___1", PlatformId: 1, TokenId: "t1"}, "c1", f)
+		_ = c.Send([]byte(`{"req_id":2001,"data":{}}`))
+		c.kick(KickNewLogin)
+		f.fail <- errors.New("connection reset by peer")
+		synctest.Wait() // readLoop has handled the error while the writer is still parked on the push
+		if f.isClosed() {
+			t.Fatal("readLoop closed the socket under the writer")
+		}
+		if r := f.next(t); r.ReqId != PushMsg {
+			t.Fatalf("queued frame lost: %+v", r)
+		}
+		expectKick(t, f, KickNewLogin)
+	})
 }
 
 // fakeChecker replays errs in order and repeats the last one.

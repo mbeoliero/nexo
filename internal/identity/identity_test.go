@@ -36,9 +36,12 @@ func TestParseActorRejects(t *testing.T) {
 }
 
 func TestValid(t *testing.T) {
+	const native = "nx__0190a6e1-2b3c-7d4e-8f5a-6b7c8d9e0f1a"
 	for s, want := range map[string]bool{
-		"u___1": true, "ag__1": true, "nx__0190": true,
-		"u___": false, "u___a": false, "zz__1": false, "nx__a:b": false,
+		"u___1": true, "ag__1": true, native: true,
+		"u___": false, "u___a": false, "zz__1": false, "nx__a:b": false, "nx__0190": false,
+		// Canonical spelling only: MySQL PAD SPACE would route a padded id to the same row.
+		native + " ": false, "nx__0190A6E1-2B3C-7D4E-8F5A-6B7C8D9E0F1A": false,
 	} {
 		if got := Valid(s); got != want {
 			t.Errorf("Valid(%q) = %v, want %v", s, got, want)

@@ -145,10 +145,10 @@ func TestShutdownSharesDeadlineAcrossConnections(t *testing.T) {
 				t.Fatal("socket still open")
 			}
 		}
-		// The budget bounds the drain; the purge still runs on a grace context, because leaving
-		// this node's rows behind makes every other node suppress pushes until online_store.ttl.
-		if len(online.purged) != 1 {
-			t.Fatalf("purge must still run after the budget expired: %v", online.purged)
+		// The budget bounds the purge too (design §10): past the deadline the rows are left to
+		// online_store.ttl and the next start's PurgeNode rather than a second timer.
+		if len(online.purged) != 0 {
+			t.Fatalf("purge ran after the budget expired: %v", online.purged)
 		}
 	})
 }
@@ -351,7 +351,7 @@ func TestCloseReleasesSlotsBeforeRemove(t *testing.T) {
 			g.users.Release(c.slot())
 		}
 		<-done
-		g.work.Wait()
+		g.work.wait()
 	})
 }
 
@@ -387,7 +387,7 @@ func TestShutdownBoundsCommittedSendPublisher(t *testing.T) {
 			t.Error("socket still open")
 		}
 		<-finished
-		g.work.Wait()
+		g.work.wait()
 		if elapsed := time.Since(start); elapsed != 5*time.Second {
 			t.Errorf("publisher lifetime = %v, want 5s", elapsed)
 		}

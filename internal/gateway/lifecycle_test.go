@@ -51,7 +51,7 @@ func TestKickStopsAdmissionWithoutInterruptingFlush(t *testing.T) {
 			t.Error("read loop interrupted the pending kick flush")
 		}
 		close(f.release)
-		g.work.Wait()
+		g.work.wait()
 		if r := f.next(t); r.ReqId != Resync {
 			t.Errorf("queued frame was lost: %+v", r)
 		}
@@ -81,7 +81,7 @@ func TestKickBoundsEntireDrain(t *testing.T) {
 			t.Error("kick did not hard-close socket at overall drain deadline")
 		}
 		c.Close("test")
-		g.work.Wait()
+		g.work.wait()
 	})
 }
 
@@ -231,8 +231,8 @@ func TestPresenceCleanupTasksAreBounded(t *testing.T) {
 		if len(g.cleanup) != cap(g.cleanup) {
 			t.Fatalf("cleanup tasks: %d, want bounded capacity %d", len(g.cleanup), cap(g.cleanup))
 		}
-		g.cancelOps()
-		g.work.Wait()
+		g.work.cancelOps()
+		g.work.wait()
 		if len(g.cleanup) != 0 {
 			t.Fatal("cleanup permits leaked after cancellation")
 		}
@@ -256,7 +256,7 @@ func TestUnlimitedPushAccounting(t *testing.T) {
 			if err := c.Push([]byte(`{}`)); err != nil {
 				t.Fatal(err)
 			}
-			if got := g.sendBytes.Load(); got != 2 {
+			if got := g.budget.queued.Load(); got != 2 {
 				t.Errorf("unlimited Push skipped accounting: got %d, want 2", got)
 			}
 			switch action {
@@ -269,7 +269,7 @@ func TestUnlimitedPushAccounting(t *testing.T) {
 					t.Error("full queue did not reject push")
 				}
 			}
-			if got := g.sendBytes.Load(); got != 0 {
+			if got := g.budget.queued.Load(); got != 0 {
 				t.Errorf("released bytes = %d, want 0", got)
 			}
 		})

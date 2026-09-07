@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"uuid"
 )
 
 const PrefixLength = 4
@@ -84,7 +85,10 @@ func Valid(userId string) bool {
 		_, err := ParseActor(userId)
 		return err == nil
 	case PrefixNative:
-		return true
+		// Canonical spelling only, as for ParseActor: MySQL PAD SPACE collations equate "x " with
+		// "x", so a padded id would reach the same row yet fork every string built from it.
+		u, err := uuid.Parse(userId[PrefixLength:])
+		return err == nil && u.String() == userId[PrefixLength:]
 	}
 	return false
 }

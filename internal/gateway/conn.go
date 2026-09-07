@@ -58,10 +58,7 @@ func (c *Client) closeControl() {
 		return
 	}
 	deadline := time.Now().Add(time.Second)
-	c.gw.workMu.Lock()
-	ctx := c.gw.shutdownCtx
-	c.gw.workMu.Unlock()
-	if ctx != nil {
+	if ctx := c.gw.work.shutdownContext(); ctx != nil {
 		if ctx.Err() != nil {
 			return
 		}

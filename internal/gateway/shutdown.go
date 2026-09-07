@@ -12,14 +12,12 @@ func (g *Gateway) Shutdown(ctx context.Context) error {
 	g.kickMu.Lock()
 	g.closing.Store(true)
 	g.kickMu.Unlock()
-	g.workMu.Lock()
-	g.shutdownCtx = ctx
-	g.workMu.Unlock()
+	g.work.shutdown(ctx)
 	g.cancelRun()
 	clients := g.users.Close()
 	hardDone := make(chan struct{})
 	stopHard := context.AfterFunc(ctx, func() {
-		g.cancelOps()
+		g.work.cancelOps()
 		g.cancel()
 		for _, c := range clients {
 			c.hardClose()
@@ -42,20 +40,18 @@ func (g *Gateway) Shutdown(ctx context.Context) error {
 		}
 	}
 	if ctx.Err() != nil {
-		g.cancelOps()
+		g.work.cancelOps()
 		for _, c := range clients {
 			c.hardClose()
 			c.close()
 		}
 	}
 	g.cancel()
-	g.cancelOps()
-	g.workMu.Lock()
-	g.sealed = true
-	g.workMu.Unlock()
+	g.work.cancelOps()
+	g.work.seal()
 	done := make(chan struct{})
 	go func() {
-		g.work.Wait()
+		g.work.wait()
 		close(done)
 	}()
 	select {
@@ -66,20 +62,11 @@ func (g *Gateway) Shutdown(ctx context.Context) error {
 	return errors.Join(ctx.Err(), g.purgeNode(ctx))
 }
 
-// purgeGrace bounds the presence purge once the caller's deadline has already blown. Skipping it
-// there is the worst case, not the safe one: this node's online_conns rows then live to
-// online_store.ttl and every other node reads these users as online and suppresses their pushes.
-// A bounded overrun buys that back; an uncooperative store still cannot hold Shutdown open.
-const purgeGrace = time.Second
-
+// purgeNode shares the caller's deadline (design §10): once it has passed, this node's leftover
+// online_conns rows expire by online_store.ttl and the next start runs PurgeNode again.
 func (g *Gateway) purgeNode(ctx context.Context) error {
-	if g.deps.Online == nil {
+	if g.deps.Online == nil || ctx.Err() != nil {
 		return nil
-	}
-	if ctx.Err() != nil {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(context.WithoutCancel(ctx), purgeGrace)
-		defer cancel()
 	}
 	purged := make(chan error, 1)
 	go func() { purged <- g.deps.Online.PurgeNode(ctx, g.cfg.NodeId) }()

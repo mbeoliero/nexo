@@ -19,10 +19,10 @@ const deliverTimeout = 10 * time.Second
 func (g *Gateway) startDeliver() {
 	g.deliverOnce.Do(func() {
 		for _, ch := range g.deliver {
-			if !g.beginWork() {
+			if !g.work.begin() {
 				return
 			}
-			go func() { defer g.work.Done(); g.deliverWorker(ch) }()
+			go func() { defer g.work.done(); g.deliverWorker(ch) }()
 		}
 	})
 }

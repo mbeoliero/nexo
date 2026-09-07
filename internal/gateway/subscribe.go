@@ -18,10 +18,10 @@ import (
 // Run owns the node-level loops: purge stale online rows, renew on a timer, consume
 // the Bus. It returns when ctx is done or the Bus subscription fails.
 func (g *Gateway) Run(ctx context.Context) error {
-	if !g.beginWork() {
+	if !g.work.begin() {
 		return nil
 	}
-	defer g.work.Done()
+	defer g.work.done()
 	ctx, cancel := context.WithCancel(ctx)
 	stop := context.AfterFunc(g.runCtx, cancel)
 	if g.runCtx.Err() != nil {
@@ -139,7 +139,7 @@ func (g *Gateway) publishKick(c *Client) {
 		g.kick(c.activeCtx, userId, platformId, keepTokenId)
 		return
 	}
-	ctx, cancel := connOp(c, c.activeCtx)
+	ctx, cancel := g.work.op(c.activeCtx)
 	defer cancel()
 	if ctx.Err() != nil {
 		return

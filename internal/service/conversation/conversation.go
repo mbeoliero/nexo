@@ -58,6 +58,9 @@ func (s *Service) MarkRead(ctx context.Context, userId, readerConnId, conversati
 	if err != nil {
 		return 0, errcode.ErrStoreFailed.Wrap(err)
 	}
+	// The row's spelling is authoritative: MySQL PAD SPACE lets "sg_g1 " find sg_g1's row, and
+	// the other devices only match the stored id.
+	conversationId = row.ConversationId
 	target := min(readSeq, conv.VisibleMax(row.UserConversation, row.ConvMaxSeq))
 	if target <= row.ReadSeq {
 		return row.ReadSeq, nil

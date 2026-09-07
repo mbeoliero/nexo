@@ -52,6 +52,7 @@ func token(userId int64) string {
 type fakeConn struct {
 	in     chan []byte
 	out    chan []byte
+	fail   chan error // ReadMessage returns the error without closing: a peer reset
 	done   chan struct{}
 	once   sync.Once
 	block  bool // WriteMessage never returns: simulates a stalled peer
@@ -61,13 +62,15 @@ type fakeConn struct {
 }
 
 func newFakeConn() *fakeConn {
-	return &fakeConn{in: make(chan []byte), out: make(chan []byte, 64), done: make(chan struct{})}
+	return &fakeConn{in: make(chan []byte), out: make(chan []byte, 64), fail: make(chan error, 1), done: make(chan struct{})}
 }
 
 func (f *fakeConn) ReadMessage() ([]byte, error) {
 	select {
 	case b := <-f.in:
 		return b, nil
+	case err := <-f.fail:
+		return nil, err
 	case <-f.done:
 		return nil, errcode.ErrConnClosed
 	}
@@ -77,6 +80,11 @@ func (f *fakeConn) WriteMessage(b []byte) error {
 	if f.block {
 		<-f.done
 		return errors.New("closed")
+	}
+	select {
+	case <-f.done: // a real socket refuses writes once closed
+		return errcode.ErrConnClosed
+	default:
 	}
 	f.out <- b
 	return nil
@@ -196,26 +204,24 @@ func TestClientRateLimitClosesAfterThree(t *testing.T) {
 	f := newFakeConn()
 	serve(t, g, "u___1", f)
 
-	for range 5 {
+	// One frame at a time: the close on the third over-limit frame does not drain the queue, so
+	// a burst could cut off the earlier 10005 replies before the writer sends them.
+	for range 2 {
 		f.in <- []byte(`{"req_id":1001}`)
-	}
-	waitClosed(t, f)
-	// The third 10005 may be cut off by the close; the first two must arrive.
-	var limited int
-	for done := false; !done; {
-		select {
-		case b := <-f.out:
-			var r Response
-			_ = json.Unmarshal(b, &r)
-			if r.Code == errcode.ErrTooManyRequests.Code {
-				limited++
-			}
-		default:
-			done = true
+		if r := f.next(t); r.Code == errcode.ErrTooManyRequests.Code {
+			t.Fatalf("burst frame limited: %+v", r)
 		}
 	}
-	if limited < 2 || !f.isClosed() || g.Stats().RateLimited != 3 {
-		t.Fatalf("limited=%d closed=%v stats=%+v", limited, f.isClosed(), g.Stats())
+	for range 2 {
+		f.in <- []byte(`{"req_id":1001}`)
+		if r := f.next(t); r.Code != errcode.ErrTooManyRequests.Code {
+			t.Fatalf("want 10005, got %+v", r)
+		}
+	}
+	f.in <- []byte(`{"req_id":1001}`)
+	waitClosed(t, f)
+	if g.Stats().RateLimited != 3 {
+		t.Fatalf("stats=%+v", g.Stats())
 	}
 }
 
@@ -234,8 +240,8 @@ func TestSlowConsumerIsClosedAndCounted(t *testing.T) {
 	if !errors.Is(err, errcode.ErrConnClosed) || !f.isClosed() || g.Stats().SlowConsumers != 1 {
 		t.Fatalf("err=%v closed=%v stats=%+v", err, f.isClosed(), g.Stats())
 	}
-	if g.users.Count() != 0 || g.sendBytes.Load() != 0 {
-		t.Fatalf("leak: conns=%d bytes=%d", g.users.Count(), g.sendBytes.Load())
+	if g.users.Count() != 0 || g.budget.queued.Load() != 0 {
+		t.Fatalf("leak: conns=%d bytes=%d", g.users.Count(), g.budget.queued.Load())
 	}
 }
 

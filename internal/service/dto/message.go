@@ -2,12 +2,7 @@
 // service packages do not import each other).
 package dto
 
-import (
-	"github.com/samber/lo"
-
-	"github.com/mbeoliero/nexo/internal/auth"
-	"github.com/mbeoliero/nexo/internal/store"
-)
+import "github.com/mbeoliero/nexo/internal/store"
 
 type Message struct {
 	ServerMsgId    string `json:"server_msg_id"`
@@ -41,10 +36,13 @@ type SendRequest struct {
 	SenderRead  *bool  `json:"sender_read"`
 }
 
-// SenderReadFor resolves the sender_read default for a send authenticated as source (an
-// auth.Source* constant): a platform send over the internal channel leaves the sender's own
-// devices unread, a client send marks its own conversation read. It lives next to the wire type
-// so the HTTP and WS handlers cannot drift into two versions of one product rule.
-func (r SendRequest) SenderReadFor(source string) bool {
-	return lo.FromPtrOr(r.SenderRead, source != auth.SourceInternal)
+// SenderReadFor resolves the sender_read default: a platform send over the internal channel
+// leaves the sender's own devices unread, a client send marks its own conversation read. It lives
+// next to the wire type so the HTTP and WS handlers cannot drift into two versions of one product
+// rule; the caller says whether the request was authenticated as auth.SourceInternal.
+func (r SendRequest) SenderReadFor(internal bool) bool {
+	if r.SenderRead != nil {
+		return *r.SenderRead
+	}
+	return !internal
 }

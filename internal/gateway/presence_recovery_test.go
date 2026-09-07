@@ -92,9 +92,9 @@ func TestPresenceRecovery(t *testing.T) {
 					)
 					t.Cleanup(func() {
 						c.Close("test")
-						g.work.Wait()
+						g.work.wait()
 						g.cancelRun()
-						g.cancelOps()
+						g.work.cancelOps()
 						g.cancel()
 					})
 					if err := g.users.Register(c); err != nil {
@@ -120,7 +120,7 @@ func TestPresenceRecovery(t *testing.T) {
 					case "closed-stays-offline", "draining-stays-offline":
 						if scenario == "closed-stays-offline" {
 							c.Close("test")
-							g.work.Wait()
+							g.work.wait()
 						} else {
 							c.kick(KickNewLogin)
 						}
@@ -145,7 +145,7 @@ func TestPresenceRecovery(t *testing.T) {
 							"127.0.0.1",
 							newFakeConn(),
 						)
-						t.Cleanup(func() { healthy.Close("test"); g.work.Wait() })
+						t.Cleanup(func() { healthy.Close("test"); g.work.wait() })
 						if err := g.users.Register(healthy); err != nil {
 							t.Fatal(err)
 						}
@@ -217,7 +217,7 @@ func testRecoveryCloseOrdering(t *testing.T, g *Gateway, c *Client, online *reco
 		t.Fatal(err)
 	}
 	<-closed
-	g.work.Wait()
+	g.work.wait()
 	assertRecoveryOnline(t, online, c, false)
 	if _, err := g.renew(t.Context()); err != nil {
 		t.Fatal(err)

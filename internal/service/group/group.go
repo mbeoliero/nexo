@@ -195,6 +195,9 @@ func (s *Service) Kick(ctx context.Context, groupId, operatorId, targetId string
 	if err != nil {
 		return err
 	}
+	if !identity.Valid(targetId) {
+		return errcode.ErrInvalidParam.WithMessage("invalid user id: " + targetId)
+	}
 	if targetId == g.OwnerId {
 		return errcode.ErrCannotKickOwner
 	}
@@ -227,6 +230,11 @@ func (s *Service) remove(ctx context.Context, g *store.Group, operatorId, userId
 			target, err := member(ctx, tx, g.Id, userId)
 			if err != nil {
 				return err
+			}
+			// The row's spelling is authoritative: MySQL PAD SPACE lets "u___1 " find u___1's row.
+			userId = target.UserId
+			if userId == g.OwnerId {
+				return errcode.ErrCannotKickOwner
 			}
 			if op.Role == store.RoleAdmin && target.Role >= store.RoleAdmin {
 				return errcode.ErrNoPermission

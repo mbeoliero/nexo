@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"path"
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -39,10 +40,10 @@ type Deps struct {
 func Register(e *route.Engine, prefix string, cfg *config.Config, d Deps) {
 	root := e.Group(prefix)
 	// Credentials and message content are always redacted; log.redact_paths only adds to the set.
-	redact := lo.Uniq(lo.Map(append([]string{
+	redact := mountPaths(prefix, append([]string{
 		"/api/v1/auth/login", "/api/v1/auth/register", "/api/v1/message/send", "/api/v1/internal/message/send",
-	}, cfg.Log.RedactPaths...), func(p string, _ int) string { return prefix + p }))
-	skip := lo.Map(cfg.Log.SkipPaths, func(p string, _ int) string { return prefix + p })
+	}, cfg.Log.RedactPaths...))
+	skip := mountPaths(prefix, cfg.Log.SkipPaths)
 	// ClientIP first: Trace, ProcessLogger, IpRateLimit and the WS handshake all read c.ClientIP().
 	trusted, _ := cfg.Server.TrustedCIDRs() // Validate rejected malformed CIDRs at startup
 	root.Use(middleware.ClientIP(trusted), middleware.Trace(),
@@ -54,6 +55,12 @@ func Register(e *route.Engine, prefix string, cfg *config.Config, d Deps) {
 	if d.Ws != nil {
 		root.GET("/ws", d.Ws)
 	}
+}
+
+// mountPaths joins the way Hertz's route groups do (path.Join), so a prefix like "/im/" yields
+// "/im/api/..." and the access log's c.Path() comparison still matches.
+func mountPaths(prefix string, paths []string) []string {
+	return lo.Uniq(lo.Map(paths, func(p string, _ int) string { return path.Join("/", prefix, p) }))
 }
 
 func registerRoutes(root *route.RouterGroup, cfg *config.Config, d Deps, trusted []*net.IPNet) {

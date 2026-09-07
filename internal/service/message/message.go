@@ -137,15 +137,17 @@ func (s *Service) Send(ctx context.Context, in SendInput) (Ack, error) {
 	var conversationId string
 	switch in.SessionType {
 	case store.ConversationSingle:
-		if _, err := s.store.GetUser(ctx, in.RecvId); errors.Is(err, store.ErrNotFound) {
+		u, err := s.store.GetUser(ctx, in.RecvId)
+		if errors.Is(err, store.ErrNotFound) {
 			return Ack{}, errcode.ErrUserNotFound
 		} else if err != nil {
 			return Ack{}, errcode.ErrStoreFailed.Wrap(err)
 		}
 		// recv_id/group_id are client-supplied; the field belonging to the other session type is
 		// never validated, so drop it before it reaches the conversation row, the message row
-		// and the push event.
+		// and the push event. The recipient id is the stored spelling, as for groups below.
 		in.GroupId = ""
+		in.RecvId = u.Id
 		conversationId = conv.Single(in.SenderId, in.RecvId)
 	case store.ConversationGroup:
 		g, err := s.store.GetGroup(ctx, in.GroupId)

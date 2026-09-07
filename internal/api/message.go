@@ -27,10 +27,11 @@ func (h messageHandler) send(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 	id := webx.IdentityFrom(c)
+	internal := id.Source == auth.SourceInternal
 	ack, err := h.svc.Send(ctx, message.SendInput{
 		SenderId: id.UserId, ClientMsgId: req.ClientMsgId, SessionType: req.SessionType, RecvId: req.RecvId, GroupId: req.GroupId,
 		ContentType: req.ContentType, Content: req.Content,
-		SenderRead: req.SenderReadFor(id.Source), Unlimited: id.Source == auth.SourceInternal,
+		SenderRead: req.SenderReadFor(internal), Unlimited: internal,
 	})
 	webx.Respond(ctx, c, ack, err)
 }
