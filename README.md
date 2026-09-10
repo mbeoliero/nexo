@@ -146,7 +146,7 @@ Use `server.New` → `Mount` → `Start` on the host's Hertz engine. Follow the
 | Understand architecture and invariants | [`docs/design.md`](docs/design.md) |
 | Integrate a client or backend | [`docs/integration.md`](docs/integration.md), including the Go [`sdk/`](sdk/) |
 | Embed in a Hertz host | [`docs/embedding.md`](docs/embedding.md) |
-| Run load acceptance | [`docs/load-testing.md`](docs/load-testing.md) |
+| Run load acceptance or the Web demo | [`docs/load-testing.md`](docs/load-testing.md), [`web/README.md`](web/README.md) |
 | Evaluate future synchronization | [`docs/sync-design.md`](docs/sync-design.md) — **unimplemented draft**; [`docs/sync-research.md`](docs/sync-research.md) — source evidence and historical experiments |
 
 ## Development
