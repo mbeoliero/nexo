@@ -77,7 +77,8 @@ func TestMessageDatabaseRegressions(t *testing.T) {
 				ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 				defer cancel()
 				retries := &simultaneousRetries{Store: st, ready: make(chan struct{})}
-				s := New(Adapt(retries), NoopPublisher{}, 64)
+				pub := &recorder{}
+				s := New(Adapt(retries), pub, Config{MaxContentBytes: 64})
 				in := SendInput{SenderId: owner, RecvId: member, ClientMsgId: "same", SessionType: 1, ContentType: 1, Content: `{}`}
 				acks := make([]Ack, 2)
 				errs := make([]error, 2)
@@ -89,8 +90,11 @@ func TestMessageDatabaseRegressions(t *testing.T) {
 				if errs[0] != nil || errs[1] != nil || acks[0] != acks[1] || acks[0].Seq != 1 {
 					t.Fatalf("retries must return the same original ACK: %+v, %v", acks, errs)
 				}
+				if s.RepublishCount() != 1 || len(pub.events) != 2 || pub.events[1] != pub.events[0] {
+					t.Fatalf("concurrent retry must republish once: count=%d events=%+v", s.RepublishCount(), pub.events)
+				}
 				in.ClientMsgId = "next"
-				next, err := New(Adapt(st), NoopPublisher{}, 64).Send(ctx, in)
+				next, err := New(Adapt(st), NoopPublisher{}, Config{MaxContentBytes: 64}).Send(ctx, in)
 				if err != nil || next.Seq != 2 {
 					t.Fatalf("retry must not consume seq: %+v, %v", next, err)
 				}
@@ -106,7 +110,7 @@ func TestMessageDatabaseRegressions(t *testing.T) {
 				testSendTimeMonotonic(t, st)
 			})
 			t.Run("client message id whitespace", func(t *testing.T) {
-				testSendClientMsgIdWhitespace(t, New(Adapt(st), NoopPublisher{}, 64), SendInput{
+				testSendClientMsgIdWhitespace(t, New(Adapt(st), NoopPublisher{}, Config{MaxContentBytes: 64}), SendInput{
 					SenderId: owner, RecvId: member, SessionType: store.ConversationSingle,
 					ContentType: 1, Content: `{"text":"original"}`, Unlimited: true,
 				})

@@ -28,6 +28,12 @@ func (g *Gateway) dispatch(c *Client, req Request) []byte {
 
 func (g *Gateway) handle(ctx context.Context, c *Client, req Request) (any, error) {
 	switch req.ReqId {
+	case ReqSetOnlineSubscriptions:
+		var in onlineSubscriptionRequest
+		if err := bind(req, &in); err != nil {
+			return nil, err
+		}
+		return g.setOnlineSubscriptions(c, in)
 	case ReqGetMaxSeqs:
 		var in struct {
 			Cursor string `json:"cursor"`

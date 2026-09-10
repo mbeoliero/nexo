@@ -39,7 +39,9 @@ jobs:
           git diff --exit-code -- internal/store/pgstore/gen internal/cache/pg/gen
           test -z "$(git ls-files --others --exclude-standard -- internal/store/pgstore/gen internal/cache/pg/gen)"
       - name: test script regressions
-        run: python3 scripts/test-deploy.py
+        run: |
+          python3 scripts/test-deploy.py
+          python3 scripts/test-load.py
 
   test:
     runs-on: ubuntu-latest
@@ -50,6 +52,27 @@ jobs:
           go-version-file: go.mod
           cache: true
       - run: go test -race ./...
+
+  cross-node:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: small cross-node correctness run
+        env:
+          NEXO_LOAD_NODES: "3"
+          NEXO_LOAD_OUTPUT: ${{ runner.temp }}/nexo-load
+        run: ./scripts/test-load.sh -users 12 -active 12 -duration 3s -ramp 1s -settle 3s
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cross-node-report
+          path: ${{ runner.temp }}/nexo-load
+          if-no-files-found: ignore
 
   integration:
     runs-on: ubuntu-latest

@@ -27,7 +27,7 @@ func (r *recorder) Publish(_ context.Context, ev PushEvent) {
 	r.events = append(r.events, ev)
 }
 
-func setup(t *testing.T) (*Service, *storetest.Mem, *recorder) {
+func setup(t *testing.T, cfg Config) (*Service, *storetest.Mem, *recorder) {
 	t.Helper()
 	m := storetest.NewMem()
 	now := store.NowMs()
@@ -42,7 +42,8 @@ func setup(t *testing.T) (*Service, *storetest.Mem, *recorder) {
 		_ = m.UpsertUserConversation(t.Context(), &store.UserConversation{OwnerId: id, ConversationId: conv.Group("g1"), Type: store.ConversationGroup, GroupId: "g1", MinSeq: 1, UpdatedAt: now})
 	}
 	r := &recorder{}
-	return New(Adapt(m), r, 64), m, r
+	cfg.MaxContentBytes = 64
+	return New(Adapt(m), r, cfg), m, r
 }
 
 func single(client, content string) SendInput {
@@ -51,7 +52,7 @@ func single(client, content string) SendInput {
 
 func TestSendSingle(t *testing.T) {
 	ctx := t.Context()
-	s, m, r := setup(t)
+	s, m, r := setup(t, Config{})
 
 	ack1, err := s.Send(ctx, single("c1", `{"text":"hi"}`))
 	if err != nil || ack1.Seq != 1 || ack1.ConversationId != "si_u___1:u___2" || ack1.ServerMsgId == "" {
@@ -61,8 +62,8 @@ func TestSendSingle(t *testing.T) {
 	if err != nil || again != ack1 {
 		t.Fatalf("idempotent resend must return the same ack: %+v vs %+v (%v)", again, ack1, err)
 	}
-	if len(r.events) != 1 || r.events[0].Message.Seq != 1 || r.events[0].RecvId != "u___2" {
-		t.Fatalf("publish once: %+v", r.events)
+	if len(r.events) != 2 || r.events[0].Message.Seq != 1 || r.events[0].RecvId != "u___2" || r.events[1] != r.events[0] {
+		t.Fatalf("republish original message: %+v", r.events)
 	}
 
 	su, _ := m.GetUserConversation(ctx, "u___1", ack1.ConversationId)
@@ -104,7 +105,7 @@ func TestSendSingle(t *testing.T) {
 
 func TestSendValidation(t *testing.T) {
 	ctx := t.Context()
-	s, _, _ := setup(t)
+	s, _, _ := setup(t, Config{})
 	cases := map[string]struct {
 		in   SendInput
 		want error
@@ -134,7 +135,7 @@ func TestSendRejectsTrailingWhitespace(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			s, _, _ := setup(t)
+			s, _, _ := setup(t, Config{})
 			testSendClientMsgIdWhitespace(t, s, in)
 		})
 	}
@@ -192,7 +193,7 @@ func testSendClientMsgIdWhitespace(t *testing.T, s *Service, in SendInput) {
 
 func TestSendGroup(t *testing.T) {
 	ctx := t.Context()
-	s, m, r := setup(t)
+	s, m, r := setup(t, Config{})
 	in := SendInput{SenderId: "u___1", ClientMsgId: "g1", SessionType: store.ConversationGroup, GroupId: "g1", ContentType: msgbody.Custom, Content: `{"k":1}`, SenderRead: true}
 	ack, err := s.Send(ctx, in)
 	if err != nil || ack.Seq != 1 || ack.ConversationId != "sg_g1" {
@@ -225,7 +226,7 @@ func TestSendGroup(t *testing.T) {
 
 func TestPullAndMaxSeqs(t *testing.T) {
 	ctx := t.Context()
-	s, m, _ := setup(t)
+	s, m, _ := setup(t, Config{})
 	for i := range 12 {
 		if _, err := s.Send(ctx, SendInput{SenderId: "u___1", ClientMsgId: "m" + string(rune('a'+i)), SessionType: store.ConversationGroup, GroupId: "g1", ContentType: msgbody.Text, Content: `{}`, SenderRead: true}); err != nil {
 			t.Fatal(err)
@@ -304,11 +305,11 @@ func (r *ctxRecorder) Publish(ctx context.Context, _ PushEvent) {
 // The message is durable once the tx commits, so the push must not be cancelled along with the
 // request: every other node would silently never see it, and only a client-side pull would recover.
 func TestPublishSurvivesRequestCancellation(t *testing.T) {
-	_, m, _ := setup(t)
+	_, m, _ := setup(t, Config{})
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	rec := &ctxRecorder{}
-	s := New(Adapt(cancelOnCommit{Store: m, cancel: cancel}), rec, 64)
+	s := New(Adapt(cancelOnCommit{Store: m, cancel: cancel}), rec, Config{MaxContentBytes: 64})
 
 	if _, err := s.Send(ctx, single("c1", `{"text":"hi"}`)); err != nil {
 		t.Fatal(err)
@@ -330,7 +331,7 @@ func TestPublishSurvivesRequestCancellation(t *testing.T) {
 // push event, or a sender could stamp a group id of their choosing onto a private chat.
 func TestSendDropsForeignRoutingField(t *testing.T) {
 	ctx := t.Context()
-	s, m, r := setup(t)
+	s, m, r := setup(t, Config{})
 
 	in := single("c1", `{"text":"hi"}`)
 	in.GroupId = "g1"
@@ -375,7 +376,7 @@ func TestSendDropsForeignRoutingField(t *testing.T) {
 }
 
 func TestSendSeqCollisionIsNotIdempotent(t *testing.T) {
-	s, m, _ := setup(t)
+	s, m, _ := setup(t, Config{})
 	now := store.NowMs()
 	// A row past the conversation's max_seq: the next allocation collides on (conversation_id, seq).
 	// InsertMessage reports that exactly like a client_msg_id duplicate, but the client never sent
@@ -393,15 +394,12 @@ func TestSendSeqCollisionIsNotIdempotent(t *testing.T) {
 	}
 }
 
-// The Set* methods are exported for an embedding host, which may call them while Send is running.
-func TestSettersDoNotRaceSend(t *testing.T) {
-	s, _, _ := setup(t)
+// Cache invalidation remains concurrent with sends and recipient lookups.
+func TestMemberCacheInvalidationDoesNotRaceSend(t *testing.T) {
+	s, _, _ := setup(t, Config{SendPerMin: 6000, MemberCacheTtl: time.Minute})
 	var wg sync.WaitGroup
 	wg.Go(func() {
-		for i := range 50 {
-			s.SetSendRateLimit(6000)
-			s.SetMemberCacheTtl(time.Duration(i) * time.Millisecond)
-			s.SetOfflinePush(nil, nil)
+		for range 50 {
 			s.InvalidateGroup("g1")
 		}
 	})

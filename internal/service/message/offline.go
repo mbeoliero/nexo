@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/mbeoliero/kit/log"
+	"github.com/samber/lo"
 
 	"github.com/mbeoliero/nexo/internal/offlinepush"
 )
@@ -48,8 +49,7 @@ func (s *Service) OfflinePushDropped() int64 { return s.pushDropped.Load() }
 // visible range covers the message (the roster is a candidate filter, not authorization; design §6.1),
 // drops online users and hands the rest to the Pusher. Fail-closed: any store/OnlineStore error pushes nobody (A8).
 func (s *Service) offlinePush(ctx context.Context, ev PushEvent) {
-	target := s.push.Load()
-	if target == nil {
+	if s.pusher == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, offlinePushTimeout)
@@ -68,7 +68,8 @@ func (s *Service) offlinePush(ctx context.Context, ev PushEvent) {
 		log.CtxError(ctx, "offline push mute filter conv=%s: %v", ev.ConversationId, err)
 		return
 	}
-	targets = slices.DeleteFunc(targets, func(id string) bool { return slices.Contains(muted, id) })
+	mutedSet := lo.SliceToMap(muted, func(id string) (string, bool) { return id, true })
+	targets = slices.DeleteFunc(targets, func(id string) bool { return mutedSet[id] })
 	if len(targets) == 0 {
 		return
 	}
@@ -80,8 +81,8 @@ func (s *Service) offlinePush(ctx context.Context, ev PushEvent) {
 		return
 	}
 	offline := targets
-	if target.online != nil {
-		online, err := target.online.Online(ctx, targets)
+	if s.online != nil {
+		online, err := s.online.Online(ctx, targets)
 		if err != nil {
 			log.CtxError(ctx, "offline push online check conv=%s: %v (skipping)", ev.ConversationId, err)
 			return
@@ -91,7 +92,7 @@ func (s *Service) offlinePush(ctx context.Context, ev PushEvent) {
 	if len(offline) == 0 {
 		return
 	}
-	if err := target.pusher.Push(ctx, offline, notification(ev)); err != nil {
+	if err := s.pusher.Push(ctx, offline, notification(ev)); err != nil {
 		log.CtxError(ctx, "offline push conv=%s seq=%d users=%d: %v", ev.ConversationId, ev.Message.Seq, len(offline), err)
 	}
 }

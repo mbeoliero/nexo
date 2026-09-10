@@ -93,18 +93,6 @@ func (c *Cache) Get(ctx context.Context, key string) (string, bool, error) {
 	return v, err == nil, err
 }
 
-func (c *Cache) MGet(ctx context.Context, keys []string) (map[string]string, error) {
-	rows, err := c.q.MGet(ctx, keys)
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[string]string, len(rows))
-	for _, r := range rows {
-		out[r.Key] = r.Value
-	}
-	return out, nil
-}
-
 func (c *Cache) Set(ctx context.Context, key, val string, ttl time.Duration) error {
 	return c.q.Set(ctx, gen.SetParams{Key: key, Value: val, TtlSeconds: ttlSeconds(ttl)})
 }
@@ -117,22 +105,6 @@ func (c *Cache) SetNX(ctx context.Context, key, val string, ttl time.Duration) (
 	return err == nil, err
 }
 
-func (c *Cache) Del(ctx context.Context, keys ...string) error {
-	return c.q.Del(ctx, keys)
-}
-
 func (c *Cache) DelIfValue(ctx context.Context, key, expected string) error {
 	return c.q.DelIfValue(ctx, gen.DelIfValueParams{Key: key, Value: expected})
-}
-
-func (c *Cache) IncrBy(ctx context.Context, key string, delta int64, ttl time.Duration) (int64, error) {
-	return c.q.IncrBy(ctx, gen.IncrByParams{Key: key, Delta: delta, TtlSeconds: ttlSeconds(ttl)})
-}
-
-func (c *Cache) Expire(ctx context.Context, key string, ttl time.Duration) (bool, error) {
-	_, err := c.q.Expire(ctx, gen.ExpireParams{Key: key, TtlSeconds: ttlSeconds(ttl)})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
-	}
-	return err == nil, err
 }

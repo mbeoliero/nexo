@@ -17,14 +17,14 @@ import (
 )
 
 // newPushGateway wires services into the gateway the way app.Build does.
-func newPushGateway(t *testing.T) (*Gateway, *group.Service) {
+func newPushGateway(t *testing.T, memberCacheTtl time.Duration) (*Gateway, *group.Service) {
 	t.Helper()
 	m := storetest.NewMem()
 	for _, id := range []string{"u___1", "u___2", "u___3"} {
 		_ = m.UpsertUser(t.Context(), &store.User{Id: id, UpdatedAt: time.Now()})
 	}
 	var g *Gateway
-	msg := message.New(message.Adapt(m), message.PublisherFunc(func(ctx context.Context, ev message.PushEvent) { g.Deliver(ctx, ev) }), 8192)
+	msg := message.New(message.Adapt(m), message.PublisherFunc(func(ctx context.Context, ev message.PushEvent) { g.Deliver(ctx, ev) }), message.Config{MaxContentBytes: 8192, MemberCacheTtl: memberCacheTtl})
 	conv := conversation.New(m, conversation.NotifierFunc(func(ctx context.Context, ev conversation.ReadEvent) {
 		g.ConversationRead(ctx, ev.UserId, ev.ReaderConnId, ev.ConversationId, ev.ReadSeq)
 	}))
@@ -50,7 +50,7 @@ func (f *fakeConn) quiet(t *testing.T) {
 }
 
 func TestSinglePushReachesPeerAndOtherDevices(t *testing.T) {
-	g, _ := newPushGateway(t)
+	g, _ := newPushGateway(t, 0)
 	sender := serveOn(t, g, "u___1", 1)
 	senderOther := serveOn(t, g, "u___1", 2)
 	peer := serveOn(t, g, "u___2", 1)
@@ -76,7 +76,7 @@ func fmtData(r Response) string {
 }
 
 func TestGroupPushHonoursMembershipAndVisibility(t *testing.T) {
-	g, groups := newPushGateway(t)
+	g, groups := newPushGateway(t, 0)
 	info, err := groups.Create(t.Context(), "u___1", group.CreateInput{Name: "g", MemberIds: []string{"u___2"}})
 	if err != nil {
 		t.Fatal(err)
@@ -106,7 +106,7 @@ func TestGroupPushHonoursMembershipAndVisibility(t *testing.T) {
 }
 
 func TestMarkReadFansOutConvRead(t *testing.T) {
-	g, _ := newPushGateway(t)
+	g, _ := newPushGateway(t, 0)
 	a := serveOn(t, g, "u___1", 1)
 	b := serveOn(t, g, "u___1", 2)
 	peer := serveOn(t, g, "u___2", 1)

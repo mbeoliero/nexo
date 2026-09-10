@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json/v2"
 	"fmt"
+	"sync/atomic"
 
 	"github.com/mbeoliero/kit/log"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/mbeoliero/nexo/errcode"
 	"github.com/mbeoliero/nexo/internal/bus"
 )
 
@@ -16,7 +18,8 @@ const channel = "nexo:events"
 // Bus uses one PUBLISH / SUBSCRIBE channel. go-redis reconnects and resubscribes on
 // its own; the subscribe confirmation it re-emits afterwards is our reconnect signal.
 type Bus struct {
-	cli *redis.Client
+	cli         *redis.Client
+	noReceivers atomic.Int64
 }
 
 func New(ctx context.Context, addr, password string, db int) (*Bus, error) {
@@ -30,14 +33,24 @@ func New(ctx context.Context, addr, password string, db int) (*Bus, error) {
 
 func (b *Bus) Close() error { return b.cli.Close() }
 
+func (b *Bus) NoReceiversCount() int64 { return b.noReceivers.Load() }
+
+func (b *Bus) DegradedPublishes() (int64, bool) { return b.noReceivers.Load(), true }
+
 func (b *Bus) Publish(ctx context.Context, ev bus.Event) error {
 	raw, err := json.Marshal(ev)
 	if err != nil {
 		return fmt.Errorf("bus/redis: %w", err)
 	}
-	if err := b.cli.Publish(ctx, channel, raw).Err(); err != nil {
+	receivers, err := b.cli.Publish(ctx, channel, raw).Result()
+	if err != nil {
 		return fmt.Errorf("bus/redis: publish: %w", err)
 	}
+	if receivers == 0 {
+		b.noReceivers.Add(1)
+		return errcode.ErrBusFailed
+	}
+	// A positive count confirms at least one subscriber, not delivery to every node.
 	return nil
 }
 

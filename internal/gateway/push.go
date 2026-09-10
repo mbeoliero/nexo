@@ -14,28 +14,9 @@ import (
 // deliverTimeout bounds one push: the ref lookup, the recipient query and the visibility query.
 const deliverTimeout = 10 * time.Second
 
-// startDeliver launches the push workers. They live until the gateway context is cancelled at the
-// end of Shutdown; the channels are never closed, so a late event is dropped rather than panicking.
+// startDeliver launches one push worker per shard; startPool owns their lifecycle.
 func (g *Gateway) startDeliver() {
-	g.deliverOnce.Do(func() {
-		for _, ch := range g.deliver {
-			if !g.work.begin() {
-				return
-			}
-			go func() { defer g.work.done(); g.deliverWorker(ch) }()
-		}
-	})
-}
-
-func (g *Gateway) deliverWorker(ch <-chan message.PushPayload) {
-	for {
-		select {
-		case <-g.ctx.Done():
-			return
-		case p := <-ch:
-			g.deliverOne(p)
-		}
-	}
+	g.deliverOnce.Do(func() { startPool(g, 1, g.deliverOne, g.deliver...) })
 }
 
 // enqueuePush hands the event to the shard that owns its conversation. Sharding by conversation
@@ -79,7 +60,9 @@ func (g *Gateway) Deliver(ctx context.Context, ev message.PushEvent) {
 		log.CtxError(ctx, "push recipients conv=%s seq=%d: %v", ev.ConversationId, ev.Message.Seq, err)
 		return
 	}
-	local := g.users.Online(candidates)
+	// Excluding the sending connection here, and not only in fanout, skips the visibility query on a
+	// node whose sole local connection is the one that sent the message (design §6.1).
+	local := g.users.OnlineExcept(candidates, ev.SenderConnId)
 	if len(local) == 0 {
 		return
 	}

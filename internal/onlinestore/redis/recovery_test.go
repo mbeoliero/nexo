@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -58,8 +59,15 @@ func TestRenewRestoresLostRegistration(t *testing.T) {
 			if n, err := cli.ZCard(t.Context(), key(c.UserId)).Result(); err != nil || n != 0 {
 				t.Fatalf("registration was not lost: size=%d err=%v", n, err)
 			}
-			if err := s.Renew(t.Context(), "n1", []onlinestore.ConnRef{c}); err != nil {
+			revived, err := s.Renew(t.Context(), "n1", []onlinestore.ConnRef{c})
+			if err != nil {
 				t.Fatal(err)
+			}
+			// The gateway publishes presence_changed for exactly these refs, so a restore the driver
+			// performs silently would leave every peer showing the user offline until its next
+			// periodic read (design §7.4).
+			if !slices.Equal(revived, []onlinestore.ConnRef{c}) {
+				t.Fatalf("renew restored the registration but reported %v as revived", revived)
 			}
 			got, err := s.Online(t.Context(), []string{c.UserId})
 			if err != nil || len(got[c.UserId]) != 1 {

@@ -45,8 +45,9 @@ type Client struct {
 	cancelCtx    context.CancelFunc
 	activeCtx    context.Context // ends at draining; already-admitted handlers keep connCtx until close
 	cancelActive context.CancelFunc
-	onlineAdded  bool          // protected by gw.presence
-	drain        chan struct{} // closed by kick: writer flushes the queue, then closes
+	onlineAdded  bool                // protected by gw.presence
+	onlineSub    *onlineSubscription // protected by gw.onlineSubs.mu
+	drain        chan struct{}       // closed by kick: writer flushes the queue, then closes
 	draining     atomic.Bool
 	inflight     chan struct{}
 	frames       *rate.Limiter // inbound frames per second, burst 2x; Inf when the limit is 0
@@ -85,6 +86,7 @@ func (g *Gateway) newClient(id auth.Identity, connId, ip string, conn ClientConn
 		close(c.closed)
 		c.budget.release(leaked) // frames still in the queue will never be written
 		g.users.Unregister(c)
+		g.removeOnlineSubscriptions(c)
 	})
 	c.remove = sync.OnceFunc(func() { g.onlineRemove(c) })
 	return c
@@ -115,23 +117,32 @@ func (c *Client) resync(reason string) error {
 
 // enqueue takes ownership of n bytes already charged to budget and gives them back on failure.
 func (c *Client) enqueue(frame []byte, n int64) error {
+	full, err := c.queueFrame(frame, n)
+	if full {
+		c.Close(closeReasonSlow)
+	}
+	return err
+}
+
+// queueFrame never closes the socket: callers holding subscription state can release that lock
+// before Close unregisters subscriptions. It still owns and releases the charged bytes on failure.
+func (c *Client) queueFrame(frame []byte, n int64) (full bool, err error) {
 	c.sendMu.Lock()
 	if c.closing {
 		c.sendMu.Unlock()
 		c.budget.release(n)
-		return errcode.ErrConnClosed
+		return false, errcode.ErrConnClosed
 	}
 	select {
 	case c.send <- frame:
 		c.queued += n
 		c.sendMu.Unlock()
-		return nil
+		return false, nil
 	default:
 		c.sendMu.Unlock()
 		c.budget.release(n)
 		c.budget.slowConsumers.Add(1)
-		c.Close(closeReasonSlow)
-		return errcode.ErrConnClosed.WithMessage("send queue full")
+		return true, errcode.ErrConnClosed.WithMessage("send queue full")
 	}
 }
 

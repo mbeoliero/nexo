@@ -1,87 +1,70 @@
 # Nexo IM
 
-Go **1.27** single-binary IM server. One module, one binary, multi-node behind an LB.
-Subcommands: `serve` (long-running node) and `migrate` (one-shot).
-Also embeddable: `server/` (`New` / `Mount` / `Start` / `Shutdown` + type aliases over `internal`) for a Hertz host; `sdk/` is the net/http client. Design §15.
+Go **1.27** IM server: one module, one binary (`serve` / `migrate`), multi-node behind an LB.
+`server/` supports embedding; `sdk/` is the independent HTTP client.
 
-Architecture: `docs/design.md` (v3.2).
-The previous IM code base may be consulted for individual pieces (identity format, HMAC scheme, error codes) but its patterns are not a reference; this design and this file win.
-If code and the design doc disagree, ask. Design changes go into the doc first.
+## Before making changes
+
+- Read relevant contracts, code and tests first; ask about code/design conflicts.
+- Get explicit approval before changing schema (tables, columns, indexes, constraints), architecture, protocols, transaction boundaries, lock order or contract behavior; also before new phases, dependencies or `internal/` packages. Explain necessity, alternatives and compatibility/migration impact.
+- Existing approval covers its stated scope; ask only before expanding it. Routine work within existing boundaries can proceed. New packages need a current responsibility and consumer boundary; no scaffolding.
+- After approval, update the owning contract before implementation in the same change. Never rewrite applied migrations; add versioned migrations.
 
 ## Commands
 
-```text
-make test          go test -p=1 ./... (DB/Redis suites skip without NEXO_TEST_PG_DSN / NEXO_TEST_MYSQL_DSN / NEXO_TEST_REDIS_ADDR)
-make test-all      throwaway PG + MySQL + Redis containers, migrate, run everything, tear down (needs Docker)
-make run           serve with config/config.example.yaml on :8080
-make migrate       nexo migrate (goose, embedded SQL; needs db.dsn)
-make sqlc          sqlc generate, run out-of-module at SQLC_VERSION (pgstore + PG cache)
-make lint          gofmt -l + go vet + staticcheck
-make tidy
-make image         docker build nexo:dev (GOPROXY from `go env`)
-make compose-up    3 nodes + nginx + pg (+ redis overlay unless NEXO_COMPOSE_CONFIG=config.pg-only.yaml) on :18080 (nodes :18081-18083); `go run ./deploy/smoke` runs the acceptance
-make compose-down
-```
+[CONTRIBUTING](CONTRIBUTING.md#build-and-test) owns development commands and test safety;
+[README](README.md#quick-start) owns usage; [load-testing](docs/load-testing.md) owns load acceptance.
 
-Config: `-config path` or `NEXO_CONFIG`; env vars override (`NEXO_DB_DSN`, `NEXO_AUTH_NATIVE_SECRET`).
-Every config key must be read by code; `config/config.example.yaml` mirrors `internal/config`, and every `deploy/config*.yaml` mirrors the example (drift test in `internal/config`). Do not commit `config/config.yaml` or secrets.
+- After changing `sqlc.yaml` or its PG schema/query inputs, run `make sqlc`. Never edit generated output; both generators and pinning rules are in [Code generation](CONTRIBUTING.md#code-generation).
+- Every config key must be used. `config/config.example.yaml` covers every `internal/config` key; `deploy/config*.yaml` contains deployment overrides only. Tests check known keys and effective deployment settings after defaults are applied.
 
-After changing `internal/store/pgstore/queries/*.sql` or `migrations/postgres/*.sql`, run `make sqlc`. Never edit generated code under `pgstore/gen/`. sqlc is pinned by `SQLC_VERSION` in the Makefile and run with `go run ...@version`, deliberately not a `tool` directive: it would drag sqlc's compiler into the dependency graph of everything importing `server/` or `sdk/`. `sqlc.yaml` sets `initialisms: []` so generated fields are `Id` / `UserId`.
+## Documentation
+
+- One owner per contract: [design](docs/design.md) for architecture/rationale, [integration](docs/integration.md) for wire/API, [embedding](docs/embedding.md) for host operations. Consult legacy code only for formats; these contracts govern behavior.
+- Keep full DDL, API declarations and defaults in source; link instead of copying. Prefer compile-checked examples. Do not relocate redundant prose into new documents.
+- Design holds required behavior, boundaries and reasons, not estimates or progress/debugging logs. Keep reproducible evidence, environments and limitations in research/validation docs; session logs in PR/CI artifacts. Mark unimplemented drafts clearly.
+- Preserve transaction/visibility boundaries, failure windows, compatibility and negative evidence when shortening; update references and affected checks. Edit AGENTS.md only for lasting rules or workflows.
 
 ## Architecture
 
-1. One Go module. No internal RPC, no per-domain `go.mod`.
-2. Layers: `api` (handlers + routes) and `gateway` call `service` only; `middleware` (Trace, AccessLog, Bearer, InternalAuth) depends on `webx` + `auth`; `webx` is the HTTP helper (envelope `{code,message,data}`, identity and errcode accessors) and imports no business package. `service` calls `store`, `bus`, `onlinestore`, `offlinepush`, `tokenstore`. `auth` calls `tokenstore`; `api` middleware, the `gateway` handshake/recheck, and `service/user` (native issue/revoke) call `auth`. `tokenstore` depends on `cache` only. `app` wires everything (`Build` / `Start` / `Shutdown`); no handlers, DTOs, domain rules, signals, or Hertz construction in `app`. `api.Register` mounts routes on a caller-supplied engine. Signals, `log.WithHertz()`, and the standalone Hertz live only in `cmd/nexo` and `server.ListenAndServe`. `server` is the public facade: type aliases over `internal` DTOs (`server/types.go`) plus lifecycle, no business logic; nothing moves out of `internal`. A new service DTO gets an alias in the same change. `sdk` imports no other package of this module. `msgbody` (root) holds content_type constants, typed content parsing, and the default push preview; it depends on stdlib only so webhook receivers and hosts can import it, and it is the single definition `service/message` and `offlinepush` use.
-3. Data access is the `store.Store` interface with two implementations: `gormstore` (MySQL + PG, GORM generics API) and `pgstore` (sqlc + pgx, PG only). Transactions: `Store.WithTx(ctx, func(Store) error)`; the boundary is defined in `service`. No consumer depends on all of `store.Store`: each declares the methods it calls (`service/group.Tx`, `service/message.Tx`, `service/conversation.Store`, `service/conv.Lister`) or reuses the matching `store` sub-interface (`service/user` takes `store.UserStore`, `onlinestore/db` takes `store.OnlineConnStore`). In `group` and `message` the `WithTx` callback gets the package's own `Tx`, bridged by that package's single `Adapt(store.Store)`; a new store method reaches a service only by being added to that service's interface. Schema source of truth is the SQL migration files; no AutoMigrate. A table change touches PG SQL, MySQL SQL, and the GORM model.
-4. Everything "optional Redis" goes through one interface with a non-Redis implementation: `Bus` (redis | postgres | local), `Cache` (redis | pg | local), `OnlineStore` (db | redis). Do not read Redis directly from business code.
-5. Business packages under `service` must not import each other; compose in `app`. A response type two services share lives in `service/dto` (stdlib + `store` only), and a helper only `service` uses lives under `service` too (`service/conv` = conversation ids and cursors). A leaf package stays at `internal/` top level only when it has consumers in more than one layer (`identity`, `ratelimit`); never group leaves by kind (`utils`, `common`, `pkg`, `shared`). Schema belongs to `store`: `store/migrate` applies `migrations/` and takes `(driver, dsn)` like the `gormstore` / `pgstore` constructors.
-6. External clients (webhook pusher, platform HMAC) live in the package that uses them. Define an interface only when a consumer or a test needs a fake; the consumer owns it.
+- No internal RPC or per-domain `go.mod`. `api` and `gateway` call `service`; services do not import each other. `app` composes them and owns wiring/lifecycle only.
+- `service` uses `store`, `bus`, `onlinestore`, `offlinepush`, `tokenstore`; native issue/revoke also uses `auth`. Middleware and gateway authenticate through `auth`, which uses `tokenstore`, which uses `cache`. `webx` owns HTTP helpers without business imports.
+- `api.Register` mounts on a supplied engine. Signals, `log.WithHertz()` and standalone Hertz construction belong in `cmd/nexo` or `server.ListenAndServe`.
+- `server` exposes lifecycle and internal DTO aliases, not business logic; keep implementation internal and add an alias for each new public service DTO. `sdk` imports no other package of this module. `msgbody` owns content types, parsing and default previews, with stdlib dependencies only.
+- Services own transactions and consume narrow Store interfaces. `group`/`message` use package-local `Tx` and one `Adapt(store.Store)` each; expose new methods explicitly. Business DB access must go through Store.
+- Backends: `gormstore` uses GORM generics for MySQL/PG; `pgstore` uses sqlc/pgx for PG. No ad-hoc production SQL except `bus/postgres` session commands. SQL migrations own schema; no AutoMigrate. Table changes update PG SQL, MySQL SQL and GORM models together.
+- Keep Redis optional behind `Bus`, `Cache`, `OnlineStore`, each with a non-Redis implementation; no business Redis access. Bus is at-most-once plus Resync; no Kafka, NATS or outbox.
+- Shared service DTOs belong in `service/dto` (stdlib + `store` only); service-only helpers stay under service. Top-level internal leaves need consumers in multiple layers; no `utils`, `common`, `pkg` or `shared` buckets.
+- External clients and interfaces belong to their consumers; introduce interfaces only for an actual consumer/test need.
 
-HTTP: Hertz, standard transporter (WS needs Hijack). WS: `hertz-contrib/websocket`, same port. JSON: `encoding/json/v2` for new code; Hertz's `c.JSON` / `BindAndValidate` stay as is. Log: `github.com/mbeoliero/kit/log` with context. Errors: `errcode`. Codes are five digits `K MM NN`: K=1 business (client handles, no alert) / 2 system (our fault or a dependency; log error, alert), MM module, NN sequence, so logs and metrics classify by regex (`^2\d{4}$`). Wrap with `%w`; non-errcode errors surface as `20001`, never as `code=0`.
-
-Time: DB columns are `timestamptz` (PG) / `datetime(3)` (MySQL) with `DEFAULT now()`; Go side is `time.Time` set explicitly by the service (one `now` per transaction, truncated to milliseconds so cursors round-trip; GORM auto timestamps are disabled per model); the API and cursors carry unix milliseconds.
-
-Ids: user ids are `u___{int}` / `ag__{int}` / `nx__{uuid}` (`internal/identity`); conversation ids use `:` as separator because user ids contain `_`. server_msg_id / conn_id / token_id are UUIDv7 via stdlib `uuid`. No snowflake.
+Time: service writes one millisecond-truncated `time.Time` per transaction; disable GORM auto timestamps.
+API/cursors use Unix milliseconds; DB types and defaults belong to [design §4](docs/design.md#4-数据模型).
+IDs: use `internal/identity` for users, `:` in conversation IDs, and stdlib UUIDv7 for server message/connection/token IDs; no snowflake.
 
 ## Go
 
-- `gofmt`. Tabs. Imports: stdlib, third party, this module.
-- Before writing Go, run the `use-modern-go` skill's `list` for the file and follow it.
-- Initialisms: `Id` / `Sql` / `Http` / `Url` / `Db` / `Dsn` / `Ws` / `Ttl` / `Jwt`, not all-caps. Leave third-party types alone.
-- Comments only when the code cannot say it (a non-obvious rule, a workaround, a wire format). No doc comments that restate the name; no package comments unless they carry a rule. No ad-hoc SQL in non-test code (`pgstore` = sqlc queries, `gormstore` = GORM API + clauses); the one exemption is `bus/postgres` (`LISTEN` / `pg_notify` are session commands sqlc cannot express).
-- Generics over `any` helper types. No DI frameworks (`wire`, `fx`, `samber/do`), no `samber/oops`.
+- Run the `use-modern-go` skill's `list` for the file before writing Go. Use `gofmt`; import stdlib, third party, then this module.
+- Initialisms: `Id` / `Sql` / `Http` / `Url` / `Db` / `Dsn` / `Ws` / `Ttl` / `Jwt`; leave third-party names unchanged.
+- Use Hertz's standard transporter (WS needs Hijack) with `hertz-contrib/websocket` on the same port. New JSON code uses `encoding/json/v2`; leave Hertz `c.JSON` / `BindAndValidate` as is. WS frame `data` is nested JSON, never base64.
+- Use `github.com/mbeoliero/kit/log` with context. Route errors through `errcode.From` (unknown errors become `20001`); log system failures at error level and alert. [Error classes and wire mapping](docs/integration.md#http-envelope-and-error-codes) are stable contracts.
+- Comments explain rules, workarounds or formats; no name-restating doc comments or rule-free package comments. Prefer generics over `any` helpers; no DI frameworks or `samber/oops`.
 
-Use stdlib / `samber/lo`. Do not hand-roll equivalents; replace old forms when you touch them:
+Prefer stdlib, then `samber/lo`; replace hand-written equivalents when touching code:
 
-- Errors: wrap `%w`; match `errors.AsType[T]` — not `var e *T; errors.As`.
-- Defaults: `cmp.Or` / `cmp.Or(vals...)` — not `if x == "" { x = def }`.
-- Two-value pick: `lo.Ternary` / `lo.If` — not `v := a; if cond { v = b }`.
-- Plain `if` last: side effects, short-circuit, errors, multi-assign.
-- `min` / `max` builtins. `for i := range n`. `new(value)` for pointers to literals.
-- Slices/maps: `slices.Contains` / `Index` / `Chunk` / `Compact` / `Collect` / `Clone` / `Sorted`, `maps.Clone` / `Collect` / `Keys` / `Values`. Sorted keys: `slices.Sorted(maps.Keys(m))`.
-- `strings.Cut` / `CutPrefix` / `CutSuffix` / `CutLast` over Index + slicing.
-- `lo` only when stdlib has no one-liner: `Map` / `Filter` / `FilterMap` / `Uniq` / `SliceToMap` / `GroupBy` / `Find` / `Some`; `FromPtr` / `FromPtrOr` / `EmptyableToPtr`. Not `lo.Contains` / `Keys` / `Chunk` / `ForEach` / `ToPtr`.
-- Memoize: `sync.OnceValue` / `OnceValues` / `OnceFunc`. Goroutines under a WaitGroup: `wg.Go`.
-- Struct literals with embedded fields: set promoted fields directly (Go 1.27).
-- Concurrency state: typed atomics (`atomic.Int64`, `atomic.Bool`).
+- Wrap errors with `%w`; match with `errors.AsType[T]`.
+- Defaults: `cmp.Or`. Value selection: `lo.Ternary` / `lo.If`; plain `if` for effects, short-circuiting, errors or multi-assignment.
+- Use built-in `min`/`max`, `for i := range n`, `new(value)` and direct promoted-field initialization (Go 1.27).
+- Use `slices`, `maps` and `strings.Cut*` operations instead of loops or index/slicing equivalents; sorted keys: `slices.Sorted(maps.Keys(m))`. Use `lo` only without a stdlib one-liner; no `lo.ForEach` or `lo.ToPtr`.
+- Use `sync.OnceValue` / `OnceValues` / `OnceFunc`, `wg.Go` and typed atomics.
 
 ## Tests
 
-- `_test.go` beside the code. Stdlib `testing`. Use `t.Context()`.
-- `t.Parallel()` only when the test shares no mutable process or external state (env, cwd, DB, ports, global logger).
-- Skip DB tests when `NEXO_TEST_PG_DSN` / `NEXO_TEST_MYSQL_DSN` is empty. Store tests run the same suite against `gormstore` and `pgstore`.
-- `NEXO_TEST_*` must point only to dedicated disposable instances. Whole-table reset and embedded migration tests require `NEXO_TEST_DISPOSABLE=1`; `scripts/test-all.sh` sets it for its unique containers and loopback-assigned ports. Direct real-dependency `go test` must use `-p=1`; separate concurrent runs need separate instances. CI runs `scripts/test-all.sh -race`, checks both sqlc outputs for drift, and pins staticcheck to `v0.8.1`.
-- Bug fix: reproduce first when practical. A high-risk rule (seq allocation, idempotent send, visible range) gets one focused test.
-
-Verify with `make test` (and `make sqlc` if SQL changed).
+- Stdlib `testing`, adjacent `_test.go`, `t.Context()`. Use `t.Parallel()` only without shared mutable process/external state (env, cwd, DB, ports, logger).
+- Skip DB tests without `NEXO_TEST_PG_DSN` / `NEXO_TEST_MYSQL_DSN`; run the shared Store suite against both implementations.
+- External tests require dedicated disposable instances, `NEXO_TEST_DISPOSABLE=1` for resets/migrations and `-p=1` for direct runs. Concurrent runs need separate instances; follow [CONTRIBUTING](CONTRIBUTING.md#build-and-test).
+- Reproduce bugs first when practical; protect high-risk rules (seq, idempotency, visibility) with focused tests. Verify with `make test`.
 
 ## Do not
 
-- Start a new phase or change architecture without confirming; the user wants decisions asked first.
-- Add Redis, Kafka, NATS or an outbox table on phase 1. `Bus` is at-most-once + `Resync` by design.
-- Bypass `Store` from `service` or `api`; no ad-hoc GORM / pgx calls outside `internal/store`.
-- Return `code=0` for unknown errors; go through `errcode.From`.
-- Encode WS frame `data` as base64; it is a nested JSON object.
-- Log tokens, passwords, `Authorization`, or HMAC secrets. Redact login/register bodies (`log.redact_paths`).
-- Pre-create empty packages; add a package only when the current phase needs it.
-- Commit secrets or production DSNs.
+- Log tokens, passwords, `Authorization` or HMAC secrets; redact login/register bodies (`log.redact_paths`).
+- Commit `config/config.yaml`, secrets or production DSNs.

@@ -64,11 +64,11 @@ func (f *blockingOnline) Remove(ctx context.Context, node string, c onlinestore.
 	return f.hold(ctx)
 }
 
-func (f *blockingOnline) Renew(ctx context.Context, node string, refs []onlinestore.ConnRef) error {
+func (f *blockingOnline) Renew(ctx context.Context, node string, refs []onlinestore.ConnRef) ([]onlinestore.ConnRef, error) {
 	if !f.blockRenew {
 		return f.fakeOnline.Renew(ctx, node, refs)
 	}
-	return f.hold(ctx)
+	return nil, f.hold(ctx)
 }
 
 func (f *blockingOnline) PurgeNode(ctx context.Context, node string) error {
@@ -367,7 +367,7 @@ func TestShutdownBoundsCommittedSendPublisher(t *testing.T) {
 			<-ctx.Done()
 			close(finished)
 		})
-		g := New(testConfig(), Deps{Message: message.New(message.Adapt(mem), publisher, 8192)})
+		g := New(testConfig(), Deps{Message: message.New(message.Adapt(mem), publisher, message.Config{MaxContentBytes: 8192})})
 		socket := newFakeConn()
 		serve(t, g, "u___1", socket)
 		socket.in <- []byte(`{"req_id":1003,"data":{"client_msg_id":"c1","session_type":1,"recv_id":"u___2","content_type":1,"content":"{}"}}`)

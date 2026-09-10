@@ -29,7 +29,7 @@ func (f *orderedOnline) Remove(_ context.Context, _ string, c onlinestore.ConnRe
 	delete(f.live, c.ConnId)
 	return nil
 }
-func (f *orderedOnline) Renew(ctx context.Context, _ string, refs []onlinestore.ConnRef) error {
+func (f *orderedOnline) Renew(ctx context.Context, _ string, refs []onlinestore.ConnRef) ([]onlinestore.ConnRef, error) {
 	select {
 	case f.entered <- struct{}{}:
 	default:
@@ -37,14 +37,14 @@ func (f *orderedOnline) Renew(ctx context.Context, _ string, refs []onlinestore.
 	select {
 	case <-f.release:
 	case <-ctx.Done():
-		return ctx.Err()
+		return nil, ctx.Err()
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for _, c := range refs {
 		f.live[c.ConnId] = true
 	}
-	return nil
+	return nil, nil
 }
 
 func TestPresenceRenewCannotResurrectClosedClient(t *testing.T) {

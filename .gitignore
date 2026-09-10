@@ -1,4 +1,5 @@
 /nexo
+/load
 /bin/
 config/config.yaml
 deploy/.env

@@ -35,6 +35,7 @@ func (g *Gateway) Run(ctx context.Context) error {
 		}
 		renew.Go(func() { g.renewLoop(ctx) })
 	}
+	g.startOnlineSubscriptions(ctx)
 	return g.Subscribe(ctx)
 }
 
@@ -86,6 +87,14 @@ func (g *Gateway) Subscribe(ctx context.Context) error {
 func (g *Gateway) onEvent(ctx context.Context, ev bus.Event) {
 	ctx = log.AppendLogKv(ctx, "bus_event", ev.Type)
 	switch ev.Type {
+	case bus.TypePresenceChanged:
+		// Publication already marked this node, even if its Bus subscription was disconnected.
+		if ev.NodeId == g.cfg.NodeId {
+			return
+		}
+		if p, ok := decodeBus[bus.PresenceChanged](ctx, g, ev); ok {
+			g.markOnlineChanged(p.UserIds)
+		}
 	case bus.TypePush:
 		if p, ok := decodeBus[message.PushPayload](ctx, g, ev); ok {
 			g.enqueuePush(ctx, p)

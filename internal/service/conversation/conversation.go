@@ -13,7 +13,7 @@ import (
 	"github.com/mbeoliero/nexo/internal/store"
 )
 
-// Notifier fans a read cursor change out to the user's other connections (phase 5/6).
+// Notifier fans a read cursor change out to the user's other connections.
 type Notifier interface {
 	ConversationRead(ctx context.Context, ev ReadEvent)
 }

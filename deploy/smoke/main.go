@@ -15,7 +15,7 @@ import (
 	"github.com/mbeoliero/nexo/sdk"
 )
 
-// Acceptance smoke for the 3-node compose stack (design §12 phase 6). Run: make compose-up && go run ./deploy/smoke
+// Acceptance smoke for the 3-node compose stack. Run: make compose-up && go run ./deploy/smoke
 var lb = "http://127.0.0.1:18080"
 
 func login(name string, platform int) (tok, id string) {

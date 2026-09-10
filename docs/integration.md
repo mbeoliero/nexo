@@ -1,5 +1,73 @@
 # Platform integration
 
+Current HTTP/WS contracts and client integration. Architecture and transaction invariants live in
+[design.md](design.md); unimplemented synchronization proposals are separate in [sync-design.md](sync-design.md).
+
+## HTTP API
+
+### Public routes
+
+Prefix `/api/v1`. Except for register/login, all routes require `Authorization: Bearer <token>` and may
+carry `X-Platform-Id`. Native register/login/logout are available only when `auth.providers` includes `native`.
+
+| Method | Path | Input / result |
+| --- | --- | --- |
+| POST | /auth/register | username, password, nickname → native user id |
+| POST | /auth/login | username, password, platform_id → token |
+| POST | /auth/logout | revoke only the request token |
+| GET | /user/me | current profile |
+| PUT | /user/me | nickname, avatar, extra |
+| GET | /user/info?user_ids=a,b | profiles |
+| GET | /user/online_status?user_ids=a,b | `{items:[{user_id, online, platform_ids}]}` |
+| POST | /group/create | name, member_ids |
+| POST | /group/join | group_id; no approval workflow |
+| POST | /group/quit | group_id |
+| POST | /group/kick | administrator / owner only |
+| GET | /group/info?group_id= | members only |
+| GET | /group/members?group_id= | members only |
+| POST | /message/send | same input / ACK as WS 1003 |
+| GET | /message/pull | same range / result as WS 1002 |
+| GET | /message/max_seqs | same cursor / result as WS 1001 |
+| GET | /conversation/list | cursor, limit≤100, with_last_message |
+| POST | /conversation/read | same input / result as WS 1004 |
+| PUT | /conversation/opt | recv_msg_opt, is_pinned |
+
+Conversation lists return `{conversations:[{…, unread, read_seq, max_seq, last_message?}], next_cursor, has_more}`.
+The cursor is unpadded base64url of `<updated_at in Unix milliseconds>:<conversation_id>`, ordered by
+`updated_at DESC, conversation_id DESC`; GetMaxSeqs uses the same cursor shape. `last_message` respects
+the caller's visible range and is absent when that range is empty. `is_pinned` is stored but does not affect
+server ordering; clients may move pinned entries within the pages they have loaded. Query mechanics are
+in [design §8.8](design.md#88-会话列表服务端排序--服务端返回-last_message).
+
+LB health is a separate `GET /healthz` (or `<prefix>/healthz` when mounted). It requires no Bearer and
+returns top-level `status` / `node_id`, not a business envelope: HTTP 200 with `status:"ok"` when the
+database probe succeeds, or 503 with `status:"unavailable"` when it fails.
+
+### Internal routes
+
+Prefix `/api/v1/internal`. Every route uses [HMAC](#internal-channel-backend--nexo-hmac).
+As-user routes additionally require `X-User-Id`; they share handlers with the public routes.
+
+| Method | Path | As user | Input / result |
+| --- | --- | --- | --- |
+| GET | /health | no | `{"code":0,"message":"","data":{"status":"ok"}}` |
+| POST | /user/upsert | no | `{id, nickname, avatar, extra}`; platform `u___` / `ag__` ids, idempotent |
+| GET | /user/info?user_ids= | no | profiles |
+| GET | /user/online_status?user_ids= | no | online platforms |
+| POST | /message/send | yes | sender = `X-User-Id`; custom messages use `content_type=100` |
+| GET | /conversation/list | yes | caller's conversations |
+| POST | /group/create, /group/join, /group/quit, /group/kick | yes | same business inputs as public routes; the Go SDK exposes matching Internal* methods |
+
+For `/internal/health`, callers previously reading top-level `status` must read `data.status`.
+Deploy the server's envelope response before upgrading to the SDK that strictly validates it.
+
+### Profile fields
+
+User and group `extra` values are limited to **65,535 UTF-8 bytes**, not characters. Empty strings are
+allowed; larger values return `10001` before any write, without truncation. The same limit applies to
+HTTP, internal and embedded calls. For partial profile updates, omitted/`null` extra leaves it unchanged;
+`"extra":""` clears it.
+
 ## User ids
 
 | Prefix | Who | Example |
@@ -28,15 +96,20 @@ Before a platform user can send or receive, the backend must create the profile:
 POST /api/v1/internal/user/upsert   {"id":"u___123","nickname":"...","avatar":"...","extra":""}
 ```
 
-User and group `extra` values are limited to **65,535 UTF-8 bytes**, not characters. Empty strings are
-allowed; larger values return `10001` before any write, without truncation. The same limit applies to
-HTTP, internal and embedded calls. For partial profile updates, omitted/`null` extra leaves it unchanged;
-`"extra":""` clears it.
+## Native tokens
+
+When `native` is enabled, registration creates a native account and login issues its token. Login signs
+HS256 with `auth.native.secret`; claims are `{sub: user_id, pid: platform_id, jti: token_id, exp}`. The signed `pid`
+is authoritative; a request cannot choose a different platform for that token. WS still requires a valid
+`platform_id` query parameter. Each user/platform slot holds one current token, so a later login on the
+same platform invalidates the previous token. Logout revokes only its request token; concurrency and
+dependency-failure behavior are defined [below](#http-envelope-and-error-codes).
 
 ## Internal channel (backend → nexo), HMAC
 
-Headers: `X-Service-Name`, `X-Timestamp` (unix seconds, ±`max_skew_seconds`), `X-Nonce` (≥16 random
-bytes, unique per request), `X-User-Id` (only on as-user routes), `X-Platform-Id` (optional), `X-Signature`.
+Headers: `X-Service-Name` (must be in `allowed_services`), `X-Timestamp` (unix seconds,
+±`max_skew_seconds`), `X-Nonce` (≥16 random bytes encoded as hex/base64, unique per request),
+`X-User-Id` (required on as-user routes, otherwise empty), `X-Platform-Id` (optional, default 5), `X-Signature`.
 
 ```
 sig = hex(HMAC-SHA256(secret,
@@ -59,14 +132,6 @@ list permits direct TLS only. Proxies must overwrite forwarded headers rather th
 Go reference: `auth.Sign(secret, auth.InternalRequest{...})` in `internal/auth/internal.go`. Go callers should use
 `github.com/mbeoliero/nexo/sdk` (`sdk.New(baseUrl, sdk.WithInternalAuth(service, secret))`, `Internal*` methods with
 `sdk.AsUser(id)`); it signs the full path, mount prefix included.
-
-Routes: `GET /internal/health`, `POST /internal/user/upsert`, `GET /internal/user/info`,
-`GET /internal/user/online_status`; as-user: `POST /internal/message/send`, `GET /internal/conversation/list`,
-`POST /internal/group/{create,join,kick}`. All under `/api/v1`.
-
-`GET /api/v1/internal/health` succeeds with `{"code":0,"message":"","data":{"status":"ok"}}`.
-Callers previously reading top-level `status` must read `data.status`; deploy this server response before
-using the stricter SDK. The LB `/healthz` response remains top-level `status`/`node_id`, without an envelope.
 
 Platform-sent messages default to `sender_read=false`: the sender's own devices receive the push and see
 it as unread. Custom payloads use `content_type=100`.
@@ -106,9 +171,18 @@ Internal signature/service/time/replay refusals remain `401/10002`. Wrong login 
 
 Treat an unrecognised code by its first digit: `1xxxx` is the client's problem (show it, do not retry the
 same request), `2xxxx` is ours (retry with backoff). New codes are added within existing groups, so do not
-match on the full list.
+match on the full list. A code's class and module never change: server logs/metrics classify system errors
+with `^2\d{4}$`, or a module such as message with `^\d04\d{2}$`; system failures are logged at error level
+and expose only a generic client message.
 
-## Go SDK concurrency and response validation
+## Go SDK
+
+Use [`sdk/`](../sdk/) for the public and internal routes above; the independent LB `/healthz` is not
+wrapped. The [compiled example](../sdk/example_test.go) shows login, requests and internal HMAC signing.
+`WithPlatformId` sets the client's default platform; per-request platform/user options apply only to
+methods declaring `...RequestOption`. `WithHttpClient` accepts a custom `*http.Client`.
+
+### Concurrency and response validation
 
 Share a `*sdk.Client` across requests and token updates: `SetToken`, `Token`, Login and Logout synchronize
 local token access. Each request takes one snapshot; changing the token does not rewrite an in-flight
@@ -125,7 +199,9 @@ means an HTTP/protocol failure without an envelope error code, not success. Hand
 ## WebSocket
 
 `GET /ws?token=<jwt>&platform_id=<1..10>[&encoding=json&compression=none]` (or `Authorization: Bearer`).
-Text frames, JSON, `data` is a nested object. Empty response `message` is omitted.
+Only `encoding=json` and `compression=none` are accepted. Text frames, JSON, `data` is a nested object,
+not base64. Responses echo `op_id` and `msg_incr`; server pushes generate `op_id` and omit `msg_incr`.
+Empty response `message` is omitted; `code` retains the full error code.
 The message's `content` is itself a string containing JSON, for example
 `"content":"{\"text\":\"hello\"}"`; this differs from the outer frame's nested `data`.
 
@@ -141,10 +217,12 @@ The message's `content` is itself a string containing JSON, for example
 | 1002 PullMsgBySeqRange | C→S | `{conversation_id, begin_seq, end_seq, limit≤100}` → `{messages[], has_more}` |
 | 1003 SendMsg | C→S | `{client_msg_id, session_type(1 single/2 group), recv_id \| group_id, content_type, content, sender_read=true}` → `{server_msg_id, conversation_id, seq, send_time}` |
 | 1004 MarkRead | C→S | `{conversation_id, read_seq}` → `{read_seq}` |
+| 1006 SetOnlineSubscriptions | C→S | `{revision, user_ids}` → `{revision, snapshot_interval_ms}`; replace this connection's online-status subscription set |
 | 2001 PushMsg | S→C | full message |
 | 2002 KickOnline | S→C | `{reason: new_login \| token_expired \| over_limit}`; do not reconnect |
 | 2003 ConvRead | S→C | `{conversation_id, read_seq}` |
 | 2004 Resync | S→C | `{reason}`; run 1001 then 1002 for gaps |
+| 2005 OnlineChanged | S→C | `{revision, items:[{user_id, online, platform_ids}], stale?}`; complete online-status snapshot, see below |
 
 A rejected handshake answers with the envelope and an HTTP status that says whether retrying helps:
 
@@ -191,15 +269,113 @@ cooperative, not a forced interruption of a custom publisher that ignores cancel
 wait for recipient delivery or offline-push completion; either may occur before or after the ACK.
 A missing ACK does not imply a failed commit: retry with the same `client_msg_id`.
 
+An idempotent Send may publish the original stored message again. The fast path shares the ordinary
+message-send quota: if no quota remains, it skips republication but still returns the original ACK.
+In a group it also rechecks that the sender is still a member of a group that is not dismissed,
+before any quota is spent; a sender who is no longer allowed to post gets the original ACK with no
+republication and no 403. That recheck is not taken under the conversation row lock, so a removal
+racing a retry can still let one republication through. A concurrent duplicate detected inside the
+transaction has already spent its quota and does not spend it twice. The event uses the original
+stored content and the current request's sender connection; other sender devices and recipients can
+therefore receive a duplicate 2001. Deduplicate by `(conversation_id, seq)`, including repeated
+ACKs. HTTP, internal and embedded sends use the same service behavior. Republication does not update
+timestamps, allocate a new sequence, or invoke offline push again.
+It is an attempt to repair a missing live push, not a delivery receipt or a guaranteed recovery path.
+
+Until an ACK arrives or the user cancels, retry unacknowledged sends with the original `client_msg_id`
+and bounded backoff. After reconnecting, limit immediate resends and retain backoff for the rest so old
+requests do not exhaust the shared quota for new messages. Known Bus failures do not turn a committed
+message's ACK into an error and do not schedule a server-side retry. Keep periodic reconciliation even
+after receiving an ACK: it proves storage, not delivery or successful processing by another client.
+
 Sending a new message never decreases its conversation's message timestamps or existing user-conversation
 sort keys, even under clock rollback; equal millisecond timestamps are valid. Use `seq`, not time, for strict ordering.
 Retries retain the original ACK and do not refresh timestamps. MarkRead clamps its target to a single
 membership/conversation snapshot, so quitting while new messages arrive cannot advance its response,
 stored cursor or broadcast beyond the frozen visible range.
 
-Client sync rule: keep `local_max` per conversation. On connect or 2004 run 1001; for each conversation pull
-`[max(local_max+1, min_seq), max_seq]`. On 2001 with `seq == local_max+1` apply, `seq > local_max+1` pull
-the gap first, `seq <= local_max` drop.
+### Client synchronization
+
+Persist one `local_max` per conversation, initially 0: it is a continuous synchronization baseline, not a
+local message database. On connect, foreground recovery, 2004 or app-push wakeup, page through 1001 and
+pull `[max(local_max+1, min_seq), max_seq]` in 1002 pages. On rejoining a group, raise the baseline to at
+least `min_seq-1`; if the resulting begin is above the server maximum, set `local_max=max_seq` and skip
+the empty range. Otherwise advance to the target only after completing the pull. This also handles a
+server reset that lowers the maximum. On 2001 with `seq == local_max+1` apply, `seq > local_max+1` pull
+the gap first, and `seq <= local_max` drop.
+
+GetMaxSeqs uses a moving `updated_at` cursor: a conversation updated during pagination may move before
+the cursor, so finishing one round is not a consistent-snapshot completeness proof. Keep the client's
+periodic reconciliation fallback for silent last-message loss. Online-status subscriptions do not replace
+message reconciliation; server-driven message synchronization and its acceptance gates remain a
+[draft](sync-design.md), with unsupported reserved frame numbers. A baseline does not
+mean message bodies survived an app restart: reload visible history when the local view has no bodies.
+
+### Online status subscriptions
+
+1006 replaces the complete subscription set for the current WS connection. Authentication, user-ID
+validation and access scope match `/user/online_status`; this does not introduce friend-based authorization.
+Subscribe only to users needed by the visible conversation list and active chat. Combine overlapping UI
+references into one set and remove a user only after its last reference is released; group chats do not
+subscribe to all members automatically. An empty set cancels all subscriptions, confirms immediately,
+does not query OnlineStore, and produces no 2005. Subscriptions are not persisted across connections.
+Wire types and subscription limits live in
+[`internal/gateway/presence.go`](../internal/gateway/presence.go).
+
+`revision` is a positive, increasing integer within one connection. A lower revision returns
+`10001 InvalidParam` without changing the set; the same revision and set is an idempotent retry, and
+the same revision with a different set returns `10001`. The response confirms that the set was accepted,
+not that its initial state has been read. OnlineStore read failures do not reject an accepted set.
+An invalid ID or excessive per-connection count returns `10001`; exhausting the node's total subscription
+references returns `10005 TooManyRequests`. These failures retain the previously accepted set without
+truncation. Nodes without the online-query dependencies, and older servers that do not implement 1006,
+return `10603 InvalidProtocol`; use the HTTP query path on those connections.
+
+Two rejections mean this connection will never accept a set, so retrying a revision on it is wrong.
+`10604 NodeDraining` says the node has begun graceful shutdown, the same code its handshake answers with
+HTTP 503. Stop submitting on this connection; once it closes, reconnect through the LB, which picks
+another node, and submit the desired set there as a new connection generation. `10602 ConnClosed` says
+this connection is already draining or closed, so the reply may be among the last frames it delivers and
+may not arrive at all; treat it exactly like a disconnect. Neither code retains anything: no set was
+accepted, and the reconnected connection submits its full desired set.
+
+Serialize 1006 submissions and retain the latest desired set while a request is pending. After a `10005`,
+keep the last confirmed set and retry the latest desired set with backoff. A timeout with an unknown
+outcome on the same connection must retry the same revision and set before submitting a replacement;
+`10604` and `10602` are known outcomes and are never retried on that connection.
+After reconnecting, start a new connection generation and submit the current desired set; discard replies
+and pushes from the old generation. The server cannot recover a subscription it never accepted, so a
+rejected first subscription requires another 1006.
+
+Every non-stale 2005 replaces the state for its entire revision; missing users become unknown. There are
+no delta frames or `full` flag. Match the frame to the applicable submitted revision, and ignore obsolete
+revisions. A 2005 can precede its 1006 response, so an already submitted revision is valid before the
+confirmation arrives. Before the first valid snapshot, show unknown for all subscribed users. A
+`stale:true` frame carries no usable online state: mark the entire set unknown. A failed read never
+refreshes freshness with previously cached values.
+
+`snapshot_interval_ms` reports the server's periodic reread cadence. Start an independent freshness
+deadline when the first nonempty subscription is confirmed; each valid snapshot refreshes it. After
+three times that interval without a valid snapshot, mark the whole set unknown. A new revision does not
+reset or extend the previous deadline; cancelling to an empty set stops it. `stale` and disconnect also
+make the state unknown. Ping/Pong and 1006 retry confirmations do not prove fresh online state. An
+accepted subscription continues to be refreshed by the server: missing or stale snapshots alone do not
+trigger repeated 1006 requests or HTTP polling. This differs from retrying an unaccepted subscription.
+
+Presence pushes are best effort. Exceeding the outbound byte budget drops 2005 without sending 2004;
+the next snapshot repairs the loss. The node's snapshot rate limit drops nothing: refreshes above it
+wait in due order, so a presence storm delays snapshots instead of losing them, and only the
+client's own freshness deadline turns a long delay into unknown state. A full send queue closes the
+connection as usual. A user remains online while OnlineStore has any valid connection for that user;
+closing one device is not necessarily an offline transition. Crashed nodes and failed removals
+become visible only after the remaining presence TTL expires and a subsequent read succeeds. There
+is no hard offline-detection deadline during dependency failure. Online subscriptions affect neither
+message delivery nor message reconciliation timers.
+
+Deploy the server before clients use 1006. This version emits `presence_changed` when running and has no
+separate enable switch: coordinate upgrading all nodes sharing a Bus before starting the compatible fleet,
+or replace the fleet together. A rolling mix with old nodes does not satisfy that deployment condition.
+The `10603` fallback still applies if a client connects to an older server or after rollback.
 
 ## Offline push webhook
 

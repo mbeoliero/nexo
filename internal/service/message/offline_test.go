@@ -51,10 +51,9 @@ func (f fakeOnline) Online(context.Context, []string) (map[string][]int, error) 
 }
 
 func TestOfflinePushTargets(t *testing.T) {
-	svc, m, _ := setup(t)
 	pusher := &fakePusher{}
+	svc, m, _ := setup(t, Config{Online: onlineStub{fakeOnline{online: map[string][]int{"u___1": {1}}}}, Pusher: pusher})
 	t.Cleanup(func() { pusher.wait(t, svc) })
-	svc.SetOfflinePush(onlineStub{fakeOnline{online: map[string][]int{"u___1": {1}}}}, pusher)
 
 	// Single chat: recipient offline → one push; sender never pushed.
 	if _, err := svc.Send(t.Context(), SendInput{SenderId: "u___1", ClientMsgId: "c1", SessionType: 1, RecvId: "u___2", ContentType: msgbody.Text, Content: `{"text":"hello world"}`}); err != nil {
@@ -99,14 +98,14 @@ func TestOfflinePushTargets(t *testing.T) {
 	}
 
 	// Recipient online → no push. OnlineStore error → fail closed, no push.
-	svc.SetOfflinePush(onlineStub{fakeOnline{online: map[string][]int{"u___2": {5}}}}, pusher)
+	svc = New(svc.store, svc.pub, Config{MaxContentBytes: 64, Online: onlineStub{fakeOnline{online: map[string][]int{"u___2": {5}}}}, Pusher: pusher})
 	if _, err := svc.Send(t.Context(), SendInput{SenderId: "u___1", ClientMsgId: "c2", SessionType: 1, RecvId: "u___2", ContentType: msgbody.Text, Content: `{}`}); err != nil {
 		t.Fatal(err)
 	}
 	if len(pusher.wait(t, svc)) != 2 {
 		t.Fatalf("online recipient was pushed: %v", pusher.calls)
 	}
-	svc.SetOfflinePush(onlineStub{fakeOnline{err: errors.New("redis down")}}, pusher)
+	svc = New(svc.store, svc.pub, Config{MaxContentBytes: 64, Online: onlineStub{fakeOnline{err: errors.New("redis down")}}, Pusher: pusher})
 	if _, err := svc.Send(t.Context(), SendInput{SenderId: "u___1", ClientMsgId: "c3", SessionType: 1, RecvId: "u___2", ContentType: msgbody.Text, Content: `{}`}); err != nil {
 		t.Fatal(err)
 	}
@@ -118,14 +117,15 @@ func TestOfflinePushTargets(t *testing.T) {
 // onlineStub adapts the two-method fake to the full OnlineStore interface.
 type onlineStub struct{ fakeOnline }
 
-func (onlineStub) Add(context.Context, string, onlinestore.ConnRef) error     { return nil }
-func (onlineStub) Remove(context.Context, string, onlinestore.ConnRef) error  { return nil }
-func (onlineStub) Renew(context.Context, string, []onlinestore.ConnRef) error { return nil }
-func (onlineStub) PurgeNode(context.Context, string) error                    { return nil }
+func (onlineStub) Add(context.Context, string, onlinestore.ConnRef) error    { return nil }
+func (onlineStub) Remove(context.Context, string, onlinestore.ConnRef) error { return nil }
+func (onlineStub) Renew(context.Context, string, []onlinestore.ConnRef) ([]onlinestore.ConnRef, error) {
+	return nil, nil
+}
+func (onlineStub) PurgeNode(context.Context, string) error { return nil }
 
 func TestSendRateLimit(t *testing.T) {
-	svc, _, _ := setup(t)
-	svc.SetSendRateLimit(2)
+	svc, _, _ := setup(t, Config{SendPerMin: 2})
 	send := func(user, id string, unlimited bool) error {
 		_, err := svc.Send(t.Context(), SendInput{SenderId: user, ClientMsgId: id, SessionType: 1, RecvId: "u___3", ContentType: msgbody.Text, Content: `{}`, Unlimited: unlimited})
 		return err
@@ -143,11 +143,9 @@ func TestSendRateLimit(t *testing.T) {
 
 // A stale roster (lost group_changed) must not leak content: the push side re-checks the visible range.
 func TestOfflinePushVisibleRange(t *testing.T) {
-	svc, m, _ := setup(t)
-	svc.SetMemberCacheTtl(time.Minute)
 	pusher := &fakePusher{}
+	svc, m, _ := setup(t, Config{MemberCacheTtl: time.Minute, Online: onlineStub{fakeOnline{}}, Pusher: pusher})
 	t.Cleanup(func() { pusher.wait(t, svc) })
-	svc.SetOfflinePush(onlineStub{fakeOnline{}}, pusher)
 	if _, err := svc.Send(t.Context(), SendInput{SenderId: "u___1", ClientMsgId: "v1", SessionType: 2, GroupId: "g1", ContentType: msgbody.Text, Content: `{}`}); err != nil {
 		t.Fatal(err)
 	}
@@ -168,8 +166,7 @@ func TestOfflinePushVisibleRange(t *testing.T) {
 
 // Callers filter Recipients in place; the cached roster must survive that.
 func TestMemberCacheReturnsCopy(t *testing.T) {
-	svc, _, _ := setup(t)
-	svc.SetMemberCacheTtl(time.Minute)
+	svc, _, _ := setup(t, Config{MemberCacheTtl: time.Minute})
 	ev := PushEvent{SessionType: 2, GroupId: "g1"}
 	first, err := svc.Recipients(t.Context(), ev)
 	if err != nil || len(first) != 2 {

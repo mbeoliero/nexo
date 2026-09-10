@@ -173,9 +173,13 @@ def test_config():
     health = next(line for line in compose.splitlines() if 'mysqladmin' in line)
     assert '-h127.0.0.1' in health and '--protocol=TCP' in health, health
     assert '$$MYSQL_ROOT_PASSWORD' in health and '-pnexo' not in health, health
-    readme = (ROOT / 'README.md').read_text().split('## Embedding', 1)[1].split('## Documentation', 1)[0]
-    assert 'cfg.Db.Access = "gorm"' in readme and 'cfg.Db.Driver' in readme, 'embedding config mismatch'
-    assert 's, err := nexo.New' in readme and 'ack, err :=' in readme and readme.count('if err != nil') >= 2, 'ignored embedding errors'
+    readme = (ROOT / 'README.md').read_text()
+    assert '(docs/embedding.md)' in readme and '(server/example_test.go)' in readme, 'missing embedding entry'
+    guide = (ROOT / 'docs/embedding.md').read_text()
+    assert 'db.access=gorm' in guide and 'db.driver' in guide, 'embedding config mismatch'
+    example = (ROOT / 'server/example_test.go').read_text()
+    assert 'cfg.Db.Access = "gorm"' in example, 'embedding example uses the wrong store access'
+    assert 's, err := nexo.New' in example and 'ack, err :=' in example and example.count('if err != nil') >= 2, 'ignored embedding errors'
 
 
 def test_nginx():

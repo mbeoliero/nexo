@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -12,6 +13,7 @@ import (
 
 	goredis "github.com/redis/go-redis/v9"
 
+	"github.com/mbeoliero/nexo/errcode"
 	"github.com/mbeoliero/nexo/internal/bus"
 	"github.com/mbeoliero/nexo/internal/bus/bustest"
 )
@@ -45,6 +47,66 @@ func TestNewContextTimeoutEnabled(t *testing.T) {
 	t.Cleanup(func() { _ = b.Close() })
 	if !b.cli.Options().ContextTimeoutEnabled {
 		t.Fatal("bus constructor must enable context socket deadlines")
+	}
+}
+
+func TestPublishCountsNoReceivers(t *testing.T) {
+	addr := os.Getenv("NEXO_TEST_REDIS_ADDR")
+	if addr == "" {
+		t.Skip("NEXO_TEST_REDIS_ADDR not set")
+	}
+	if os.Getenv("NEXO_TEST_DISPOSABLE") != "1" {
+		t.Skip("zero-subscriber assertion requires NEXO_TEST_DISPOSABLE=1")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	b, err := New(ctx, addr, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	ev := bus.Event{Type: bus.TypeKick, NodeId: uuid.NewV7().String()}
+	for range 2 {
+		if err := b.Publish(ctx, ev); !errors.Is(err, errcode.ErrBusFailed) {
+			t.Fatalf("zero subscribers: got %v, want ErrBusFailed", err)
+		}
+	}
+	if got := b.NoReceiversCount(); got != 2 {
+		t.Fatalf("no receivers=%d, want 2", got)
+	}
+	if n, ok := b.DegradedPublishes(); n != 2 || !ok {
+		t.Fatalf("DegradedPublishes=%d/%v, want 2/true", n, ok)
+	}
+	other, err := New(ctx, addr, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = other.Close() })
+	if got := other.NoReceiversCount(); got != 0 {
+		t.Fatalf("another Bus inherited %d zero-receiver publications", got)
+	}
+	ps := other.cli.Subscribe(ctx, channel)
+	defer ps.Close()
+	if _, err := ps.Receive(ctx); err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	if err := b.Publish(ctx, ev); err != nil {
+		t.Fatalf("confirmed subscriber: %v", err)
+	}
+	if _, err := ps.ReceiveMessage(ctx); err != nil {
+		t.Fatalf("receive published event: %v", err)
+	}
+	if got := b.NoReceiversCount(); got != 2 {
+		t.Fatalf("successful publication increased no-receivers count to %d", got)
+	}
+	if err := b.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Publish(ctx, ev); !errors.Is(err, goredis.ErrClosed) {
+		t.Fatalf("closed client: got %v, want ErrClosed", err)
+	}
+	if got := b.NoReceiversCount(); got != 2 {
+		t.Fatalf("connection failure increased no-receivers count to %d", got)
 	}
 }
 

@@ -4,3 +4,4 @@ bin/
 *.log
 config/config.yaml
 deploy/.env
+web/

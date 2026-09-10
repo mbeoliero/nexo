@@ -64,7 +64,4 @@ func (c *memberCache) invalidate(groupId string) {
 }
 
 // InvalidateGroup drops the cached roster; the gateway calls it on group_changed.
-func (s *Service) InvalidateGroup(groupId string) { s.members.Load().invalidate(groupId) }
-
-// SetMemberCacheTtl sets the roster cache TTL (limits.group_member_cache_ttl); zero disables it.
-func (s *Service) SetMemberCacheTtl(ttl time.Duration) { s.members.Store(newMemberCache(ttl)) }
+func (s *Service) InvalidateGroup(groupId string) { s.members.invalidate(groupId) }

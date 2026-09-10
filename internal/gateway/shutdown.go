@@ -46,8 +46,11 @@ func (g *Gateway) Shutdown(ctx context.Context) error {
 			c.close()
 		}
 	}
-	g.cancel()
+	// Cancel the ops before g.ctx, not after: g.ctx stops the worker pools, and they drain what is
+	// still queued on the way out (pool.go). Cancelled ops make that drain immediate instead of one
+	// connOpTimeout per queued job.
 	g.work.cancelOps()
+	g.cancel()
 	g.work.seal()
 	done := make(chan struct{})
 	go func() {

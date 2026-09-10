@@ -40,7 +40,7 @@ func newGateway(t *testing.T, cfg *config.Config) *Gateway {
 	for _, id := range []string{"u___1", "u___2"} {
 		_ = m.UpsertUser(t.Context(), &store.User{Id: id, UpdatedAt: time.Now()})
 	}
-	return New(cfg, Deps{Auth: auth.NewExternal([]string{"ext"}, "user"), Message: message.New(message.Adapt(m), message.NoopPublisher{}, 8192), Conv: conversation.New(m, conversation.NoopNotifier{})})
+	return New(cfg, Deps{Auth: auth.NewExternal([]string{"ext"}, "user"), Message: message.New(message.Adapt(m), message.NoopPublisher{}, message.Config{MaxContentBytes: 8192}), Conv: conversation.New(m, conversation.NoopNotifier{})})
 }
 
 func token(userId int64) string {

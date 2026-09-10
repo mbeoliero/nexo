@@ -37,7 +37,7 @@ func TestAliasesCoverServiceSignatures(t *testing.T) {
 	} {
 		for i := range svc.NumMethod() {
 			m := svc.Method(i)
-			if slices.Contains([]string{"SetOnlineStore", "SetOfflinePush", "SetMemberCacheTtl", "SetSendRateLimit", "ResolvePush"}, m.Name) {
+			if slices.Contains([]string{"ResolvePush"}, m.Name) {
 				continue // wiring, called by app / gateway only
 			}
 			for j := 1; j < m.Type.NumIn(); j++ {

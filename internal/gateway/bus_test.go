@@ -28,7 +28,7 @@ func twoNodes(t *testing.T) (*Gateway, *Gateway) {
 		cfg := testConfig()
 		cfg.NodeId = id
 		g := New(cfg, Deps{Auth: auth.NewExternal([]string{"ext"}, "user"), Bus: b,
-			Message: message.New(message.Adapt(m), message.NewBusPublisher(b, id), 8192), Conv: conversation.New(m, conversation.NewBusNotifier(b, id))})
+			Message: message.New(message.Adapt(m), message.NewBusPublisher(b, id), message.Config{MaxContentBytes: 8192}), Conv: conversation.New(m, conversation.NewBusNotifier(b, id))})
 		done := make(chan error, 1)
 		go func() { done <- g.Run(t.Context()) }()
 		t.Cleanup(func() {
@@ -169,6 +169,7 @@ type flappingBus struct {
 }
 
 func (f *flappingBus) Publish(context.Context, bus.Event) error { return nil }
+func (*flappingBus) DegradedPublishes() (int64, bool)           { return 0, false }
 func (f *flappingBus) Subscribe(ctx context.Context, _ func(bus.Event), onConnected func()) error {
 	for range f.connects {
 		onConnected()

@@ -16,7 +16,7 @@ func (s canonicalGroupLookup) GetGroup(ctx context.Context, id string) (*store.G
 }
 
 func TestSendUsesCanonicalGroupId(t *testing.T) {
-	_, mem, _ := setup(t)
+	_, mem, _ := setup(t, Config{})
 	testSendCanonicalGroupId(t, canonicalGroupLookup{Store: mem}, SendInput{
 		SenderId: "u___1", GroupId: "g1", SessionType: store.ConversationGroup,
 		ContentType: 1, Content: `{}`, SenderRead: true,
@@ -27,7 +27,7 @@ func testSendCanonicalGroupId(t *testing.T, st store.Store, in SendInput) {
 	t.Helper()
 	ctx := t.Context()
 	r := &recorder{}
-	s := New(Adapt(st), r, 64)
+	s := New(Adapt(st), r, Config{MaxContentBytes: 64})
 	in.ClientMsgId = "canonical"
 	first, err := s.Send(ctx, in)
 	if err != nil {
@@ -49,8 +49,8 @@ func testSendCanonicalGroupId(t *testing.T, st store.Store, in SendInput) {
 			t.Errorf("retry with group %q: %+v, %v; want %+v", id, retry, err, second)
 		}
 	}
-	if len(r.events) != 2 {
-		t.Fatalf("retries must not publish again: %d events", len(r.events))
+	if len(r.events) != 4 || r.events[2] != r.events[1] || r.events[3] != r.events[1] {
+		t.Fatalf("retries must republish the canonical message: %+v", r.events)
 	}
 	ev := r.events[1]
 	if ev.ConversationId != first.ConversationId || ev.GroupId != canonicalId ||

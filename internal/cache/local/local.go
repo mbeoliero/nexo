@@ -2,10 +2,7 @@ package local
 
 import (
 	"context"
-	"fmt"
 	"maps"
-	"math"
-	"strconv"
 	"sync"
 	"time"
 
@@ -83,18 +80,6 @@ func (c *Cache) Get(_ context.Context, key string) (string, bool, error) {
 	return e.val, ok, nil
 }
 
-func (c *Cache) MGet(_ context.Context, keys []string) (map[string]string, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	out := make(map[string]string, len(keys))
-	for _, k := range keys {
-		if e, ok := c.get(k); ok {
-			out[k] = e.val
-		}
-	}
-	return out, nil
-}
-
 func (c *Cache) Set(_ context.Context, key, val string, ttl time.Duration) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -112,15 +97,6 @@ func (c *Cache) SetNX(_ context.Context, key, val string, ttl time.Duration) (bo
 	return true, nil
 }
 
-func (c *Cache) Del(_ context.Context, keys ...string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for _, k := range keys {
-		delete(c.m, k)
-	}
-	return nil
-}
-
 func (c *Cache) DelIfValue(_ context.Context, key, expected string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -128,43 +104,4 @@ func (c *Cache) DelIfValue(_ context.Context, key, expected string) error {
 		delete(c.m, key)
 	}
 	return nil
-}
-
-func (c *Cache) IncrBy(_ context.Context, key string, delta int64, ttl time.Duration) (int64, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	var cur int64
-	e, ok := c.get(key)
-	if ok {
-		n, err := strconv.ParseInt(e.val, 10, 64)
-		if err != nil {
-			return 0, err
-		}
-		cur = n
-	}
-	if delta > 0 && cur > math.MaxInt64-delta {
-		return 0, fmt.Errorf("cache IncrBy overflow: %w", strconv.ErrRange)
-	}
-	if delta < 0 && cur < math.MinInt64-delta {
-		return 0, fmt.Errorf("cache IncrBy overflow: %w", strconv.ErrRange)
-	}
-	cur += delta
-	exp := e.exp
-	if !ok {
-		exp = expiry(time.Now(), ttl)
-	}
-	c.m[key] = entry{val: strconv.FormatInt(cur, 10), exp: exp}
-	return cur, nil
-}
-
-func (c *Cache) Expire(_ context.Context, key string, ttl time.Duration) (bool, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	e, ok := c.get(key)
-	if !ok {
-		return false, nil
-	}
-	e.exp = expiry(time.Now(), ttl)
-	c.m[key] = e
-	return true, nil
 }

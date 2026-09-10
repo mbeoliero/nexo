@@ -45,10 +45,8 @@ func (s *Service) OnlineStatus(ctx context.Context, userIds []string) ([]OnlineS
 	}), nil
 }
 
-func (s *Service) SetOnlineStore(o onlinestore.OnlineStore) { s.online = o }
-
-func New(st store.UserStore, native *auth.Native) *Service {
-	return &Service{store: st, native: native, now: store.NowMs}
+func New(st store.UserStore, native *auth.Native, online onlinestore.OnlineStore) *Service {
+	return &Service{store: st, native: native, online: online, now: store.NowMs}
 }
 
 // requireNative guards the password-based operations. The HTTP routes are only mounted when the

@@ -169,11 +169,17 @@ func (m *UserMap) Count() int {
 	return m.total
 }
 
-// Online keeps the ids that have at least one local connection, in input order.
-func (m *UserMap) Online(userIds []string) []string {
+// OnlineExcept keeps the ids with at least one local connection other than exceptConnId, in input
+// order. Connection ids are unique, so an empty exceptConnId matches nothing and excludes nobody.
+func (m *UserMap) OnlineExcept(userIds []string, exceptConnId string) []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return lo.Filter(userIds, func(id string, _ int) bool { return len(m.byUser[id]) > 0 })
+	return lo.Filter(userIds, func(id string, _ int) bool {
+		// Connection ids are unique, so at most one of a user's connections can be exceptConnId:
+		// a second connection means the user is reachable whatever the exception is.
+		conns := m.byUser[id]
+		return len(conns) > 1 || (len(conns) == 1 && conns[0].Id != exceptConnId)
+	})
 }
 
 func (m *UserMap) All() []*Client {

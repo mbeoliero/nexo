@@ -1,4 +1,4 @@
-.PHONY: test test-all run migrate sqlc lint tidy build image compose-up compose-down
+.PHONY: test test-all test-load run migrate sqlc lint tidy build image compose-up compose-down
 
 # The copied config wins when it exists (README quick start); the example otherwise.
 CONFIG ?= $(if $(wildcard config/config.yaml),config/config.yaml,config/config.example.yaml)
@@ -8,6 +8,9 @@ test:
 
 test-all:
 	./scripts/test-all.sh
+
+test-load:
+	./scripts/test-load.sh $(LOAD_ARGS)
 
 build:
 	go build -o bin/nexo ./cmd/nexo

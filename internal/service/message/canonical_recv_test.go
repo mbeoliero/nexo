@@ -13,7 +13,7 @@ import (
 // the conversation id, the message row and the push unchanged and split the single chat
 // (design §5.1). identity.Valid now stops it at the door; the stored spelling is used past it.
 func TestSendRejectsPaddedRecvId(t *testing.T) {
-	s, mem, r := setup(t)
+	s, mem, r := setup(t, Config{})
 	ctx := t.Context()
 	const recv = "nx__0190a6e1-2b3c-7d4e-8f5a-6b7c8d9e0f1a"
 	if err := mem.UpsertUser(ctx, &store.User{Id: recv}); err != nil {

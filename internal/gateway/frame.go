@@ -10,15 +10,17 @@ import (
 
 // Client → server request ids and server → client push ids (design §7.2).
 const (
-	ReqGetMaxSeqs        = 1001
-	ReqPullMsgBySeqRange = 1002
-	ReqSendMsg           = 1003
-	ReqMarkRead          = 1004
+	ReqGetMaxSeqs             = 1001
+	ReqPullMsgBySeqRange      = 1002
+	ReqSendMsg                = 1003
+	ReqMarkRead               = 1004
+	ReqSetOnlineSubscriptions = 1006
 
-	PushMsg    = 2001
-	KickOnline = 2002
-	ConvRead   = 2003
-	Resync     = 2004
+	PushMsg       = 2001
+	KickOnline    = 2002
+	ConvRead      = 2003
+	Resync        = 2004
+	OnlineChanged = 2005
 )
 
 // Wire format is a JSON text frame; data is a nested object, never base64.

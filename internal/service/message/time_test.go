@@ -34,14 +34,13 @@ func (s pausedSendStore) WithTx(ctx context.Context, fn func(store.Store) error)
 }
 
 func TestSendTimeDoesNotRefillLimiter(t *testing.T) {
-	s, st, _ := setup(t)
+	s, st, _ := setup(t, Config{SendPerMin: 1})
 	now := store.NowMs().Add(time.Hour)
 	s.now = func() time.Time { return now }
-	s.SetSendRateLimit(1)
 	if _, err := s.Send(t.Context(), single("first", `{}`)); err != nil {
 		t.Fatal(err)
 	}
-	remote := New(Adapt(st), NoopPublisher{}, 64)
+	remote := New(Adapt(st), NoopPublisher{}, Config{MaxContentBytes: 64})
 	remote.now = func() time.Time { return now.Add(time.Hour) }
 	in := single("remote", `{}`)
 	in.RecvId = "u___3"
@@ -94,7 +93,7 @@ func testSendTimeMonotonic(t *testing.T, st store.Store) {
 			pub := &recorder{}
 			paused := pausedSendStore{Store: st, ready: make(chan struct{}), release: make(chan struct{})}
 			resume := sync.OnceFunc(func() { close(paused.release) })
-			older := New(Adapt(paused), pub, 64)
+			older := New(Adapt(paused), pub, Config{MaxContentBytes: 64})
 			older.now = func() time.Time { return base }
 			var delayed Ack
 			var delayedErr error
@@ -106,7 +105,7 @@ func testSendTimeMonotonic(t *testing.T, st store.Store) {
 			case <-ctx.Done():
 				t.Fatal(ctx.Err())
 			}
-			writer := New(Adapt(st), pub, 64)
+			writer := New(Adapt(st), pub, Config{MaxContentBytes: 64})
 			now := base.Add(20 * time.Millisecond)
 			writer.now = func() time.Time { return now }
 			firstIn := in
@@ -120,7 +119,7 @@ func testSendTimeMonotonic(t *testing.T, st store.Store) {
 			if delayedErr != nil || delayed.Seq != 2 || delayed.SendTime != first.SendTime {
 				t.Fatalf("older request committed second: first=%+v delayed=%+v, %v", first, delayed, delayedErr)
 			}
-			check := func(a Ack, want, memberTime time.Time) {
+			check := func(a Ack, want, memberTime time.Time, publishes int) {
 				t.Helper()
 				msgs, err := st.GetMessages(ctx, []store.MessageKey{{ConversationId: a.ConversationId, Seq: a.Seq}})
 				if err != nil || len(msgs) != 1 || a.SendTime != want.UnixMilli() || !msgs[0].SendTime.Equal(want) || !msgs[0].CreatedAt.Equal(want) {
@@ -137,11 +136,11 @@ func testSendTimeMonotonic(t *testing.T, st store.Store) {
 						t.Fatalf("user conversation: %+v want time=%v, %v", uc, wantTime, err)
 					}
 				}
-				if len(pub.events) != int(a.Seq) || pub.events[a.Seq-1].Message.SendTime != a.SendTime {
+				if len(pub.events) != publishes || pub.events[a.Seq-1].Message.SendTime != a.SendTime {
 					t.Fatalf("published time differs from ACK: %+v, %+v", pub.events, a)
 				}
 			}
-			check(delayed, now, now)
+			check(delayed, now, now, 2)
 
 			// A join on a faster node can leave a personal sort key ahead of the seq row.
 			uc, err := st.GetUserConversation(ctx, member, first.ConversationId)
@@ -159,7 +158,7 @@ func testSendTimeMonotonic(t *testing.T, st store.Store) {
 			if err != nil || rolled.Seq != 3 {
 				t.Fatalf("clock rollback: %+v, %v", rolled, err)
 			}
-			check(rolled, base.Add(20*time.Millisecond), uc.UpdatedAt)
+			check(rolled, base.Add(20*time.Millisecond), uc.UpdatedAt, 3)
 			now = base.Add(200 * time.Millisecond)
 			forwardIn := in
 			forwardIn.ClientMsgId = "forward"
@@ -167,13 +166,16 @@ func testSendTimeMonotonic(t *testing.T, st store.Store) {
 			if err != nil || forward.Seq != 4 {
 				t.Fatalf("clock advances: %+v, %v", forward, err)
 			}
-			check(forward, now, now)
+			check(forward, now, now, 4)
 			now = base.Add(24 * time.Hour)
 			retry, err := writer.Send(ctx, in)
 			if err != nil || retry != delayed {
 				t.Fatalf("retry changed original ACK: %+v want=%+v, %v", retry, delayed, err)
 			}
-			check(forward, base.Add(200*time.Millisecond), base.Add(200*time.Millisecond))
+			check(forward, base.Add(200*time.Millisecond), base.Add(200*time.Millisecond), 5)
+			if pub.events[4] != pub.events[1] {
+				t.Fatalf("retry changed original publication: %+v, %+v", pub.events[4], pub.events[1])
+			}
 		})
 	}
 }

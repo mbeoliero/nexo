@@ -127,7 +127,7 @@ func testSendRollbackCase(t *testing.T, st store.Store, typ int32, existing bool
 	}
 	base := store.NowMs().Add(time.Hour)
 	if existing {
-		seed := New(Adapt(st), NoopPublisher{}, 64)
+		seed := New(Adapt(st), NoopPublisher{}, Config{MaxContentBytes: 64})
 		seed.now = func() time.Time { return base }
 		first := in
 		first.ClientMsgId, first.Content, first.SenderRead = "seed", `{"text":"seed"}`, false
@@ -145,9 +145,8 @@ func testSendRollbackCase(t *testing.T, st store.Store, typ int32, existing bool
 		return injected
 	}}
 	pub, pusher := &recorder{}, &fakePusher{}
-	svc := New(Adapt(fault), pub, 64)
+	svc := New(Adapt(fault), pub, Config{MaxContentBytes: 64, Online: onlineStub{fakeOnline{}}, Pusher: pusher})
 	svc.now = func() time.Time { return base.Add(time.Second) }
-	svc.SetOfflinePush(onlineStub{fakeOnline{}}, pusher)
 	t.Cleanup(func() { pusher.wait(t, svc) })
 	a, err := svc.Send(ctx, in)
 	if !errors.Is(err, injected) || !errors.Is(err, errcode.ErrMessageSendFailed) || a != (Ack{}) || hits != 1 {
@@ -201,8 +200,8 @@ func testSendRollbackCase(t *testing.T, st store.Store, typ int32, existing bool
 	if again, err := svc.Send(ctx, in); err != nil || again != a {
 		t.Fatalf("idempotent retry: %+v, %v; want %+v", again, err, a)
 	}
-	if calls := pusher.wait(t, svc); len(calls) != 1 || len(pub.events) != 1 {
-		t.Fatalf("idempotent retry notified twice: offline=%v bus=%+v", calls, pub.events)
+	if calls := pusher.wait(t, svc); len(calls) != 1 || len(pub.events) != 2 || pub.events[1] != pub.events[0] {
+		t.Fatalf("idempotent retry must republish without another offline push: offline=%v bus=%+v", calls, pub.events)
 	}
 	if got := snapshotSend(t, ctx, st, conversationId, owners); !reflect.DeepEqual(got, committed) {
 		t.Fatal("idempotent retry changed persisted state")

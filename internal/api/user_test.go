@@ -78,10 +78,12 @@ func TestAuthAndUserFlow(t *testing.T) {
 
 type stubOnline struct{}
 
-func (stubOnline) Add(context.Context, string, onlinestore.ConnRef) error     { return nil }
-func (stubOnline) Remove(context.Context, string, onlinestore.ConnRef) error  { return nil }
-func (stubOnline) Renew(context.Context, string, []onlinestore.ConnRef) error { return nil }
-func (stubOnline) PurgeNode(context.Context, string) error                    { return nil }
+func (stubOnline) Add(context.Context, string, onlinestore.ConnRef) error    { return nil }
+func (stubOnline) Remove(context.Context, string, onlinestore.ConnRef) error { return nil }
+func (stubOnline) Renew(context.Context, string, []onlinestore.ConnRef) ([]onlinestore.ConnRef, error) {
+	return nil, nil
+}
+func (stubOnline) PurgeNode(context.Context, string) error { return nil }
 func (stubOnline) Online(_ context.Context, ids []string) (map[string][]int, error) {
 	return map[string][]int{"u___1": {1, 5}}, nil
 }

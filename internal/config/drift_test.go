@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"slices"
 	"testing"
 
@@ -14,9 +13,7 @@ import (
 
 const exampleConfig = "../../config/config.example.yaml"
 
-// deployConfigs are the shipped profiles. They differ from the example in values only: a key that
-// exists in one and not the others is drift, and drift here means an operator silently runs on a
-// default nobody chose.
+// Deployment profiles specify topology and overrides; the example documents the complete schema.
 var deployConfigs = []string{
 	"../../deploy/config.yaml",
 	"../../deploy/config.pg-only.yaml",
@@ -66,11 +63,52 @@ func TestExampleConfigMirrorsStruct(t *testing.T) {
 	assertSameKeys(t, "internal/config.Config", want, filepath.Base(exampleConfig), keyPaths(t, exampleConfig))
 }
 
-func TestDeployConfigsMatchExample(t *testing.T) {
-	want := keyPaths(t, exampleConfig)
+func TestDeployConfigsUseKnownKeys(t *testing.T) {
+	known := keyPaths(t, exampleConfig)
 	for _, path := range deployConfigs {
 		t.Run(filepath.Base(path), func(t *testing.T) {
-			assertSameKeys(t, filepath.Base(exampleConfig), want, filepath.Base(path), keyPaths(t, path))
+			actual := keyPaths(t, path)
+			for _, key := range actual {
+				if !slices.Contains(known, key) {
+					t.Errorf("unknown deployment key %q", key)
+				}
+			}
+			for _, key := range []string{
+				"server.trusted_proxies", "db.driver", "db.access", "db.max_open_conns",
+				"bus.driver", "online_store.driver", "cache.driver", "auth.providers",
+			} {
+				if !slices.Contains(actual, key) {
+					t.Errorf("deployment must explicitly choose %q", key)
+				}
+			}
+		})
+	}
+}
+
+func TestDeploymentEffectiveConfig(t *testing.T) {
+	for _, tt := range []struct {
+		name, driver, access, bus, cache, online, redisAddr string
+	}{
+		{name: "config.yaml", driver: "postgres", access: "sqlc", bus: "redis", cache: "redis", online: "redis", redisAddr: "redis:6379"},
+		{name: "config.pg-only.yaml", driver: "postgres", access: "sqlc", bus: "postgres", cache: "pg", online: "db"},
+		{name: "config.mysql.yaml", driver: "mysql", access: "gorm", bus: "redis", cache: "redis", online: "redis", redisAddr: "redis:6379"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := decode(filepath.Join("../../deploy", tt.name), false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := Default()
+			want.Server.TrustedProxies = []string{"172.16.0.0/12", "192.168.0.0/16"}
+			want.Db.Driver, want.Db.Access, want.Db.MaxOpenConns = tt.driver, tt.access, 10
+			want.Bus.Driver, want.Cache.Driver, want.OnlineStore.Driver = tt.bus, tt.cache, tt.online
+			want.Redis.Addr = tt.redisAddr
+			want.Auth.Providers = []string{"native"}
+			want.InternalAuth.AllowedServices = []string{"my-backend"}
+			want.InternalAuth.RequireTls = false
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("effective deployment differs from intended overrides:\ngot: %s\nwant: %s", got.EffectiveYAML(), want.EffectiveYAML())
+			}
 		})
 	}
 }
@@ -95,39 +133,6 @@ func TestShippedConfigsLoad(t *testing.T) {
 			}
 		})
 	}
-}
-
-// designDoc is the architecture doc; its §11 block is presented as the full config reference, so it
-// drifts like any other copy. Checking it here also catches a duplicate top-level key, which YAML
-// resolves by silently keeping the last one.
-const designDoc = "../../docs/design.md"
-
-var (
-	yamlBlock  = regexp.MustCompile("(?s)```yaml\n(.*?)```")
-	limitsHead = regexp.MustCompile(`(?m)^limits:`)
-)
-
-func TestDesignDocConfigBlockMatchesExample(t *testing.T) {
-	raw, err := os.ReadFile(designDoc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var blocks []string
-	for _, b := range yamlBlock.FindAllStringSubmatch(string(raw), -1) {
-		// The config reference is the one block with a top-level `limits:`; the rest are snippets.
-		if limitsHead.MatchString(b[1]) {
-			blocks = append(blocks, b[1])
-		}
-	}
-	if len(blocks) != 1 {
-		t.Fatalf("want exactly one config block in %s, found %d", designDoc, len(blocks))
-	}
-	var doc map[string]any
-	// yaml.v3 rejects a duplicate mapping key, which is one of the drifts this test exists to catch.
-	if err := yaml.Unmarshal([]byte(blocks[0]), &doc); err != nil {
-		t.Fatalf("%s config block: %v", designDoc, err)
-	}
-	assertSameKeys(t, filepath.Base(exampleConfig), keyPaths(t, exampleConfig), filepath.Base(designDoc), flatten(doc))
 }
 
 func TestDeployNodePortsStayLocal(t *testing.T) {

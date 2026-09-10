@@ -75,7 +75,7 @@ func TestMarkReadQuitSnapshot(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					writer := message.New(message.Adapt(st), message.NoopPublisher{}, 64)
+					writer := message.New(message.Adapt(st), message.NoopPublisher{}, message.Config{MaxContentBytes: 64})
 					in := message.SendInput{
 						SenderId: owner, ClientMsgId: "before", SessionType: 2, GroupId: g.Id,
 						ContentType: 1, Content: `{}`, Unlimited: true,

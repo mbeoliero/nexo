@@ -60,16 +60,15 @@ func newEngine(t *testing.T, opts engineOptions) (*route.Engine, func(userId int
 	deps := Deps{
 		Auth:     auth.Chain{auth.NewExternal([]string{"ext"}, "user")},
 		Internal: auth.NewInternal([]string{"secret"}, []string{"gateway"}, 300*time.Second, c),
-		User:     user.New(m, nil),
+		User:     user.New(m, nil, stubOnline{}),
 	}
 	if opts.nativeLogin {
 		native := auth.NewNative("s", time.Hour, tokenstore.New(c))
-		deps.Auth, deps.NativeLogin, deps.User = auth.Chain{native}, true, user.New(m, native)
+		deps.Auth, deps.NativeLogin, deps.User = auth.Chain{native}, true, user.New(m, native, stubOnline{})
 	}
-	deps.User.SetOnlineStore(stubOnline{})
 	if opts.chat {
 		deps.Group = group.New(group.Adapt(m), group.NoopNotifier{}, 10)
-		deps.Message = message.New(message.Adapt(m), message.NoopPublisher{}, 8192)
+		deps.Message = message.New(message.Adapt(m), message.NoopPublisher{}, message.Config{MaxContentBytes: 8192})
 		deps.Conv = conversation.New(m, conversation.NoopNotifier{})
 	}
 	e := route.NewEngine(hconfig.NewOptions(nil))

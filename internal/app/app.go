@@ -43,6 +43,7 @@ type App struct {
 	cfg     *config.Config
 	deps    api.Deps
 	gw      *gateway.Gateway
+	bus     bus.Bus
 	closers []func() // what Build opened, in open order; Shutdown runs them in reverse
 
 	runErr chan error
@@ -51,35 +52,19 @@ type App struct {
 	drainCtx context.Context
 }
 
-type Option func(*options)
-
-type options struct {
-	pusher offlinepush.Pusher
-	auth   auth.Authenticator
-	gormDb *gorm.DB
-	pool   *pgxpool.Pool
+// Dependencies are resolved by server.New before any resources are opened.
+type Dependencies struct {
+	Pusher offlinepush.Pusher
+	Auth   auth.Authenticator
+	GormDb *gorm.DB
+	Pool   *pgxpool.Pool
 }
 
-// WithOfflinePusher injects an APNs/FCM implementation in place of the configured driver.
-func WithOfflinePusher(p offlinepush.Pusher) Option { return func(o *options) { o.pusher = p } }
-
-// WithAuthenticator replaces the configured provider chain for HTTP Bearer and the WS handshake;
-// native login/logout still follow auth.providers.
-func WithAuthenticator(a auth.Authenticator) Option { return func(o *options) { o.auth = a } }
-
-// WithGormDb / WithPgxPool use a host-owned connection for the Store (design §15.1 rule 3).
-func WithGormDb(db *gorm.DB) Option      { return func(o *options) { o.gormDb = db } }
-func WithPgxPool(p *pgxpool.Pool) Option { return func(o *options) { o.pool = p } }
-
-func Build(ctx context.Context, cfg *config.Config, opts ...Option) (*App, error) {
-	var o options
-	for _, opt := range opts {
-		opt(&o)
-	}
+func Build(ctx context.Context, cfg *config.Config, deps Dependencies) (*App, error) {
 	a := &App{cfg: cfg}
 	// Past the first opened resource, every failure must close what is already open.
 	fail := func(err error) (*App, error) { a.closeAll(); return nil, err }
-	st, err := openStore(ctx, cfg.Db, o)
+	st, err := openStore(ctx, cfg.Db, deps)
 	if err != nil {
 		return nil, err
 	}
@@ -94,35 +79,38 @@ func Build(ctx context.Context, cfg *config.Config, opts ...Option) (*App, error
 	a.closers = append(a.closers, func() { c.Close() })
 	tokens := tokenstore.New(c)
 	chain, native := buildAuth(cfg.Auth, tokens)
-	authn := cmp.Or[auth.Authenticator](o.auth, chain)
+	authn := cmp.Or[auth.Authenticator](deps.Auth, chain)
 	b, closeBus, err := openBus(ctx, cfg)
 	if err != nil {
 		return fail(err)
 	}
 	a.closers = append(a.closers, closeBus)
-	deps := api.Deps{Ready: st.Ping, Auth: authn, NativeLogin: native != nil, User: user.New(st, native),
-		Group:   group.New(group.Adapt(st), group.NewBusNotifier(b, cfg.NodeId), cfg.Limits.GroupMaxMembers),
-		Message: message.New(message.Adapt(st), message.NewBusPublisher(b, cfg.NodeId), cfg.Limits.MaxContentBytes),
-		Conv:    conversation.New(st, conversation.NewBusNotifier(b, cfg.NodeId))}
-	deps.Message.SetMemberCacheTtl(cfg.Limits.GroupMemberCacheTtl)
-	deps.Message.SetSendRateLimit(cfg.Limits.MessageSendPerMin)
 	online, closeOnline, err := openOnlineStore(ctx, cfg, st)
 	if err != nil {
 		return fail(err)
 	}
 	a.closers = append(a.closers, closeOnline)
-	deps.User.SetOnlineStore(online)
-	deps.Message.SetOfflinePush(online, cmp.Or(o.pusher, openPusher(cfg.OfflinePush)))
-	gwDeps := gateway.Deps{Auth: authn, Bus: b, Online: online, Message: deps.Message, Conv: deps.Conv}
+	apiDeps := api.Deps{
+		Ready: st.Ping, Auth: authn, NativeLogin: native != nil,
+		User:  user.New(st, native, online),
+		Group: group.New(group.Adapt(st), group.NewBusNotifier(b, cfg.NodeId), cfg.Limits.GroupMaxMembers),
+		Message: message.New(message.Adapt(st), message.NewBusPublisher(b, cfg.NodeId), message.Config{
+			MaxContentBytes: cfg.Limits.MaxContentBytes, MemberCacheTtl: cfg.Limits.GroupMemberCacheTtl,
+			SendPerMin: cfg.Limits.MessageSendPerMin, Online: online,
+			Pusher: cmp.Or(deps.Pusher, openPusher(cfg.OfflinePush)),
+		}),
+		Conv: conversation.New(st, conversation.NewBusNotifier(b, cfg.NodeId)),
+	}
+	gwDeps := gateway.Deps{Auth: authn, Bus: b, Online: online, Message: apiDeps.Message, Conv: apiDeps.Conv, User: apiDeps.User}
 	if native != nil {
 		gwDeps.Native = native
 	}
 	gw := gateway.New(cfg, gwDeps)
-	deps.Ws = gw.Handle
+	apiDeps.Ws = gw.Handle
 	if ia := cfg.InternalAuth; ia.Enabled {
-		deps.Internal = auth.NewInternal(ia.AllSecrets(), ia.AllowedServices, time.Duration(ia.MaxSkewSeconds)*time.Second, c)
+		apiDeps.Internal = auth.NewInternal(ia.AllSecrets(), ia.AllowedServices, time.Duration(ia.MaxSkewSeconds)*time.Second, c)
 	}
-	a.deps, a.gw = deps, gw
+	a.deps, a.gw, a.bus = apiDeps, gw, b
 	return a, nil
 }
 
@@ -135,6 +123,21 @@ func (a *App) closeAll() {
 
 func (a *App) Deps() api.Deps            { return a.deps }
 func (a *App) Gateway() *gateway.Gateway { return a.gw }
+
+// Stats combines instance counters at the composition layer so services and bus drivers do not
+// depend on the gateway. Each counter is read independently, not as a transactional snapshot.
+// The bus counter comes through the Bus interface, not a type switch, so a driver without a
+// receiver signal and any host-injected or decorated Bus report themselves (design §6.1).
+func (a *App) Stats() gateway.Stats {
+	stats := a.gw.Stats()
+	if a.deps.Message != nil {
+		stats.MessageRepublishAttempts = a.deps.Message.RepublishCount()
+	}
+	if a.bus != nil {
+		stats.BusDegradedPublishes, stats.BusDegradedPublishesAvailable = a.bus.DegradedPublishes()
+	}
+	return stats
+}
 
 // Mount registers the routes on a caller-owned engine under prefix.
 func (a *App) Mount(e *route.Engine, prefix string) { api.Register(e, prefix, a.cfg, a.deps) }
@@ -279,16 +282,16 @@ func openCache(ctx context.Context, cfg *config.Config) (cache.Cache, error) {
 	}
 }
 
-func openStore(ctx context.Context, cfg config.DbConfig, o options) (store.Store, error) {
+func openStore(ctx context.Context, cfg config.DbConfig, deps Dependencies) (store.Store, error) {
 	switch {
-	case o.gormDb != nil && cfg.Access != "gorm":
+	case deps.GormDb != nil && cfg.Access != "gorm":
 		return nil, errors.New("app: WithGormDb requires db.access=gorm")
-	case o.pool != nil && cfg.Access != "sqlc":
+	case deps.Pool != nil && cfg.Access != "sqlc":
 		return nil, errors.New("app: WithPgxPool requires db.access=sqlc")
-	case o.gormDb != nil:
-		return gormstore.FromDb(o.gormDb), nil
-	case o.pool != nil:
-		return pgstore.FromPool(o.pool), nil
+	case deps.GormDb != nil:
+		return gormstore.FromDb(deps.GormDb), nil
+	case deps.Pool != nil:
+		return pgstore.FromPool(deps.Pool), nil
 	case cfg.Access == "sqlc":
 		return pgstore.New(ctx, cfg.Dsn, cfg.MaxOpenConns)
 	default:

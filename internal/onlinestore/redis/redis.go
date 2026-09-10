@@ -52,24 +52,38 @@ func (s *Store) Remove(ctx context.Context, nodeId string, c onlinestore.ConnRef
 	return s.cli.ZRem(ctx, key(c.UserId), member(nodeId, c)).Err()
 }
 
-func (s *Store) Renew(ctx context.Context, nodeId string, conns []onlinestore.ConnRef) error {
+func (s *Store) Renew(ctx context.Context, nodeId string, conns []onlinestore.ConnRef) ([]onlinestore.ConnRef, error) {
 	if len(conns) == 0 {
-		return nil
+		return nil, nil
 	}
 	now := s.now()
 	score := float64(now.Add(s.ttl).Unix())
 	cutoff := "(" + strconv.FormatInt(now.Unix(), 10)
 	pipe := s.cli.Pipeline()
-	for _, c := range conns {
-		// Gateway serializes snapshot+Renew with Add/Remove; lost live registrations can be restored.
-		pipe.ZAdd(ctx, key(c.UserId), redis.Z{Score: score, Member: member(nodeId, c)})
-		// Drop what a crashed node left behind. These keys are exactly the ones that stay alive
-		// long enough to accumulate, since Expire below keeps refreshing them.
+	adds := make([]*redis.IntCmd, len(conns))
+	for i, c := range conns {
+		// Trim before the ZAdd, not after it: a member whose score has passed already reads as
+		// offline, so re-scoring it in place would revive that user with no signal. Removing it
+		// first makes ZAdd's reply the exact "this registration was gone" answer the gateway
+		// publishes (design §7.4). The same statement drops what a crashed node left behind on this
+		// key; these are exactly the keys that stay alive long enough to accumulate, since Expire
+		// below keeps refreshing them.
 		pipe.ZRemRangeByScore(ctx, key(c.UserId), "-inf", cutoff)
+		// Gateway serializes snapshot+Renew with Add/Remove; lost live registrations can be restored.
+		adds[i] = pipe.ZAdd(ctx, key(c.UserId), redis.Z{Score: score, Member: member(nodeId, c)})
 		pipe.Expire(ctx, key(c.UserId), 2*s.ttl)
 	}
-	_, err := pipe.Exec(ctx)
-	return err
+	if _, err := pipe.Exec(ctx); err != nil {
+		return nil, err
+	}
+	// ZAdd counts members it created, so a non-zero reply is a registration this node had lost.
+	var revived []onlinestore.ConnRef
+	for i, cmd := range adds {
+		if cmd.Val() > 0 {
+			revived = append(revived, conns[i])
+		}
+	}
+	return revived, nil
 }
 
 func (s *Store) Online(ctx context.Context, userIds []string) (map[string][]int, error) {

@@ -15,7 +15,7 @@ import (
 	"github.com/mbeoliero/nexo/internal/store"
 )
 
-// Notifier is called after a committed membership change; the bus implements it in phase 6.
+// Notifier is called after a committed membership change.
 type Notifier interface {
 	GroupChanged(ctx context.Context, groupId string)
 }
@@ -125,7 +125,7 @@ func (s *Service) Create(ctx context.Context, ownerId string, in CreateInput) (I
 		if _, err := tx.LockConversation(ctx, conv, store.ConversationGroup, g.Id, now); err != nil {
 			return err
 		}
-		// Initial members see the whole history: min_seq = 1. One bulk insert (design §12).
+		// Initial members see the whole history: min_seq = 1. One bulk insert (design §8.5).
 		return tx.CreateUserConversations(ctx, lo.Map(ids, func(id string, _ int) store.UserConversation {
 			return store.UserConversation{OwnerId: id, ConversationId: conv, Type: store.ConversationGroup, GroupId: g.Id, MinSeq: 1, UpdatedAt: now}
 		}))
@@ -209,7 +209,7 @@ func (s *Service) Kick(ctx context.Context, groupId, operatorId, targetId string
 
 // remove deletes membership and freezes the visible upper bound at the current max_seq. A group
 // with no message yet has max_seq 0, which would read as "no upper bound", so that row is deleted
-// instead (design §4.2).
+// instead (design §4 user_conversations).
 func (s *Service) remove(ctx context.Context, g *store.Group, operatorId, userId string) error {
 	conv := conv.Group(g.Id)
 	now := s.now()

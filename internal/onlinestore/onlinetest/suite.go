@@ -16,6 +16,9 @@ import (
 type Opts struct {
 	// Purgeless: entries carry their own expiry, so PurgeNode leaves them in place.
 	Purgeless bool
+	// Reviveless: the driver cannot tell a registration it restored from one it merely extended,
+	// so Renew reports no revivals and §7.4's periodic snapshot is what covers the difference.
+	Reviveless bool
 }
 
 // Run drives the OnlineStore contract with a store clock the suite controls: setClock
@@ -114,7 +117,18 @@ func runContract(t *testing.T, s onlinestore.OnlineStore, expire func(), o Opts)
 	// Renew keeps n1 alive across an expiry window; n2's leftovers die.
 	must(s.Add(ctx, n2, b1))
 	expire()
-	must(s.Renew(ctx, n1, []onlinestore.ConnRef{a1}))
+	revived, err := s.Renew(ctx, n1, []onlinestore.ConnRef{a1})
+	must(err)
+	// a1 had already expired, so this Renew put the user back online rather than extending them.
+	// The gateway announces exactly the refs reported here, so a driver that can see the difference
+	// must report it; one that cannot must report nothing rather than the whole batch (design §7.4).
+	want := []onlinestore.ConnRef{a1}
+	if o.Reviveless {
+		want = nil
+	}
+	if !slices.Equal(revived, want) {
+		t.Fatalf("renew brought a1 back online and reported %v as revived, want %v", revived, want)
+	}
 	got, _ = s.Online(ctx, []string{u1, u2})
 	if !slices.Equal(got[u1], []int{1}) || len(got[u2]) != 0 {
 		t.Fatalf("after expiry: %v", got)

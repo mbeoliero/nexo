@@ -1,23 +1,68 @@
 package user
 
 import (
+	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/mbeoliero/nexo/errcode"
 	"github.com/mbeoliero/nexo/internal/auth"
 	"github.com/mbeoliero/nexo/internal/cache/local"
+	"github.com/mbeoliero/nexo/internal/onlinestore"
 	"github.com/mbeoliero/nexo/internal/store/storetest"
 	"github.com/mbeoliero/nexo/internal/tokenstore"
 )
+
+type onlineLookup struct {
+	onlinestore.OnlineStore
+	lookup func(context.Context, []string) (map[string][]int, error)
+}
+
+func (o onlineLookup) Online(ctx context.Context, ids []string) (map[string][]int, error) {
+	return o.lookup(ctx, ids)
+}
+
+func TestOnlineStatusUsesConstructorDependency(t *testing.T) {
+	t.Parallel()
+	lookupErr := errors.New("lookup unavailable")
+	for _, tt := range []struct {
+		name      string
+		online    onlinestore.OnlineStore
+		platforms []int
+		wantErr   error
+	}{
+		{name: "no store", platforms: []int{}},
+		{name: "online", platforms: []int{1, 5}, online: onlineLookup{lookup: func(context.Context, []string) (map[string][]int, error) {
+			return map[string][]int{"u___1": {1, 5}}, nil
+		}}},
+		{name: "failure", wantErr: lookupErr, online: onlineLookup{lookup: func(context.Context, []string) (map[string][]int, error) {
+			return nil, lookupErr
+		}}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := New(storetest.NewMem(), nil, tt.online)
+			got, err := s.OnlineStatus(t.Context(), []string{"u___1"})
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("lookup: %v", err)
+			}
+			if tt.wantErr != nil {
+				return
+			}
+			if len(got) != 1 || got[0].Platforms == nil || !slices.Equal(got[0].Platforms, tt.platforms) || got[0].Online != (len(tt.platforms) > 0) {
+				t.Fatalf("status: %+v", got)
+			}
+		})
+	}
+}
 
 func newService(t *testing.T) (*Service, *auth.Native) {
 	t.Helper()
 	c := local.New()
 	t.Cleanup(func() { c.Close() })
 	native := auth.NewNative("s", time.Hour, tokenstore.New(c))
-	return New(storetest.NewMem(), native), native
+	return New(storetest.NewMem(), native, nil), native
 }
 
 func TestRegisterLoginLogout(t *testing.T) {
@@ -140,7 +185,7 @@ func TestGetUpdate(t *testing.T) {
 // enabled, so the password paths must refuse rather than dereference a nil *auth.Native.
 func TestNativeDisabledIsAnErrorNotAPanic(t *testing.T) {
 	ctx := t.Context()
-	s := New(storetest.NewMem(), nil)
+	s := New(storetest.NewMem(), nil, nil)
 
 	if _, err := s.Register(ctx, "alice", "secret1", "Alice"); !errors.Is(err, errcode.ErrProviderDisabled) {
 		t.Fatalf("register: %v", err)

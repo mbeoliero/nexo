@@ -97,13 +97,23 @@ type ucRow struct {
 	ConvMaxSeq int64
 }
 
+func (s *Store) userConversationRows(ownerId string) gorm.ChainInterface[ucRow] {
+	from := clause.From{
+		Tables: []clause.Table{{Name: "user_conversations", Alias: "uc"}},
+		Joins: []clause.Join{{Type: clause.InnerJoin, Table: clause.Table{Name: "conversations", Alias: "c"},
+			ON: clause.Where{Exprs: []clause.Expression{clause.Eq{
+				Column: clause.Column{Table: "c", Name: "conversation_id"},
+				Value:  clause.Column{Table: "uc", Name: "conversation_id"},
+			}}},
+		}},
+	}
+	return gorm.G[ucRow](s.db, from).Select("uc.*, c.max_seq AS conv_max_seq").Where("uc.owner_id = ?", ownerId)
+}
+
 func (s *Store) ListUserConversations(ctx context.Context, ownerId string, cursor store.ListCursor, limit int) ([]store.UserConversationRow, error) {
-	var rows []ucRow
-	err := s.db.WithContext(ctx).Table("user_conversations AS uc").
-		Select("uc.*, c.max_seq AS conv_max_seq").
-		Joins("JOIN conversations c ON c.conversation_id = uc.conversation_id").
-		Where("uc.owner_id = ? AND (uc.updated_at, uc.conversation_id) < (?, ?)", ownerId, cursor.UpdatedAt, cursor.ConversationId).
-		Order("uc.updated_at DESC, uc.conversation_id DESC").Limit(limit).Scan(&rows).Error
+	rows, err := s.userConversationRows(ownerId).
+		Where("(uc.updated_at, uc.conversation_id) < (?, ?)", cursor.UpdatedAt, cursor.ConversationId).
+		Order("uc.updated_at DESC, uc.conversation_id DESC").Limit(limit).Find(ctx)
 	if err != nil {
 		return nil, wrap(err)
 	}

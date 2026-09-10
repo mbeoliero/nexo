@@ -20,7 +20,7 @@ func TestExtraBytes(t *testing.T) {
 	for _, operation := range []string{"upsert-create", "upsert-update", "partial-update"} {
 		t.Run(operation, func(t *testing.T) {
 			ctx := t.Context()
-			s := New(storetest.NewMem(), nil)
+			s := New(storetest.NewMem(), nil, nil)
 			var before Profile
 			var err error
 			if operation != "upsert-create" {
@@ -62,7 +62,7 @@ func TestExtraBytes(t *testing.T) {
 
 	t.Run("nil-keeps-empty-clears", func(t *testing.T) {
 		ctx := t.Context()
-		s := New(storetest.NewMem(), nil)
+		s := New(storetest.NewMem(), nil, nil)
 		before, err := s.Upsert(ctx, id, "name", "avatar", " keep me ")
 		if err != nil {
 			t.Fatal(err)

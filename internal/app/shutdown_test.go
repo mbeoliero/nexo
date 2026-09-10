@@ -37,8 +37,7 @@ func shutdownApp(t *testing.T) (*App, *blockedPusher) {
 		t.Fatal(err)
 	}
 	p := &blockedPusher{entered: make(chan struct{}), release: make(chan struct{}), done: make(chan struct{})}
-	svc := message.New(message.Adapt(mem), message.NoopPublisher{}, 1024)
-	svc.SetOfflinePush(nil, p)
+	svc := message.New(message.Adapt(mem), message.NoopPublisher{}, message.Config{MaxContentBytes: 1024, Pusher: p})
 	return &App{deps: api.Deps{Message: svc}, gw: gateway.New(&config.Config{}, gateway.Deps{})}, p
 }
 

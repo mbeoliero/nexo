@@ -56,13 +56,6 @@ func (c *authFailureCache) Set(ctx context.Context, key, val string, ttl time.Du
 	return c.Cache.Set(ctx, key, val, ttl)
 }
 
-func (c *authFailureCache) Del(ctx context.Context, keys ...string) error {
-	if err := c.before("del"); err != nil {
-		return err
-	}
-	return c.Cache.Del(ctx, keys...)
-}
-
 func (c *authFailureCache) DelIfValue(ctx context.Context, key, expected string) error {
 	if err := c.before("delifvalue"); err != nil {
 		return err
@@ -87,7 +80,7 @@ func newAuthFailureEngine(t *testing.T) (*route.Engine, *authFailureCache, user.
 	// A later provider's invalid-token result must not hide a native dependency failure.
 	chain := auth.Chain{native, auth.NewExternal([]string{"ext"}, "user")}
 	mem := storetest.NewMem()
-	svc := user.New(mem, native)
+	svc := user.New(mem, native, nil)
 	cfg := config.Default()
 	cfg.InternalAuth.RequireTls = false
 	g := gateway.New(cfg, gateway.Deps{Auth: chain})

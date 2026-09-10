@@ -11,6 +11,7 @@ import (
 	"unicode"
 	"uuid"
 
+	"github.com/mbeoliero/kit/log"
 	"github.com/samber/lo"
 
 	"github.com/mbeoliero/nexo/errcode"
@@ -24,7 +25,7 @@ import (
 	"github.com/mbeoliero/nexo/msgbody"
 )
 
-// Publisher receives the committed message; the bus fans it out to connected clients in phase 5/6.
+// Publisher receives the committed message; the bus fans it out to connected clients.
 type Publisher interface {
 	Publish(ctx context.Context, ev PushEvent)
 }
@@ -53,17 +54,19 @@ type Service struct {
 	maxContent int
 	now        func() time.Time
 
-	// Set* are exported for an embedding host (server.New), which may call them from another
-	// goroutine after Start; Send and the push workers read them on every message.
-	members   atomic.Pointer[memberCache]
-	push      atomic.Pointer[offlineTarget]
-	sendLimit atomic.Pointer[ratelimit.Keyed]
+	// Dependencies are fixed at construction; the cache and limiter synchronize their own state.
+	members   *memberCache
+	online    onlinestore.OnlineStore
+	pusher    offlinepush.Pusher
+	sendLimit *ratelimit.Keyed
 
 	// Offline pushes run in the background, at most offlinePushWorkers at a time; Wait joins them
 	// at shutdown so nothing touches the store after it closed.
 	pushSem     chan struct{}
 	pushWg      sync.WaitGroup
 	pushDropped atomic.Int64
+
+	republished atomic.Int64
 }
 
 const offlinePushWorkers = 64
@@ -76,34 +79,25 @@ const publishTimeout = 5 * time.Second
 // guard maxTrackedIps is; past it the extra senders share one bucket.
 const maxTrackedSenders = 100000
 
-// SetSendRateLimit enforces limits.message_send_per_min per user across HTTP and WS
-// (node-local; SendInput.Unlimited bypasses it for the internal channel).
-func (s *Service) SetSendRateLimit(perMin int) {
-	s.sendLimit.Store(ratelimit.NewKeyed(float64(perMin)/60, perMin, maxTrackedSenders))
+// RepublishCount includes failed attempts, but not retries skipped by the send limit.
+func (s *Service) RepublishCount() int64 { return s.republished.Load() }
+
+type Config struct {
+	MaxContentBytes int
+	MemberCacheTtl  time.Duration
+	SendPerMin      int
+	Online          onlinestore.OnlineStore
+	Pusher          offlinepush.Pusher
 }
 
-// offlineTarget keeps the two SetOfflinePush halves in one word: a reader must never see the
-// pusher without the OnlineStore that decides who is offline.
-type offlineTarget struct {
-	online onlinestore.OnlineStore
-	pusher offlinepush.Pusher
-}
-
-// SetOfflinePush enables app pushes for offline recipients (design §8.9). A nil pusher leaves the
-// feature off: Send then skips the presence lookup entirely rather than computing it for nobody.
-func (s *Service) SetOfflinePush(online onlinestore.OnlineStore, pusher offlinepush.Pusher) {
-	if pusher == nil {
-		s.push.Store(nil)
-		return
+func New(st Store, pub Publisher, cfg Config) *Service {
+	return &Service{
+		store: st, pub: pub, maxContent: cfg.MaxContentBytes, now: store.NowMs,
+		members: newMemberCache(cfg.MemberCacheTtl),
+		online:  cfg.Online, pusher: cfg.Pusher,
+		sendLimit: ratelimit.NewKeyed(float64(cfg.SendPerMin)/60, cfg.SendPerMin, maxTrackedSenders),
+		pushSem:   make(chan struct{}, offlinePushWorkers),
 	}
-	s.push.Store(&offlineTarget{online: online, pusher: pusher})
-}
-
-func New(st Store, pub Publisher, maxContentBytes int) *Service {
-	s := &Service{store: st, pub: pub, maxContent: maxContentBytes, now: store.NowMs,
-		pushSem: make(chan struct{}, offlinePushWorkers)}
-	s.members.Store(newMemberCache(0))
-	return s
 }
 
 type Message = dto.Message
@@ -134,43 +128,25 @@ func (s *Service) Send(ctx context.Context, in SendInput) (Ack, error) {
 	if err := s.validate(in); err != nil {
 		return Ack{}, err
 	}
-	var conversationId string
-	switch in.SessionType {
-	case store.ConversationSingle:
-		u, err := s.store.GetUser(ctx, in.RecvId)
-		if errors.Is(err, store.ErrNotFound) {
-			return Ack{}, errcode.ErrUserNotFound
-		} else if err != nil {
-			return Ack{}, errcode.ErrStoreFailed.Wrap(err)
-		}
-		// recv_id/group_id are client-supplied; the field belonging to the other session type is
-		// never validated, so drop it before it reaches the conversation row, the message row
-		// and the push event. The recipient id is the stored spelling, as for groups below.
-		in.GroupId = ""
-		in.RecvId = u.Id
-		conversationId = conv.Single(in.SenderId, in.RecvId)
-	case store.ConversationGroup:
-		g, err := s.store.GetGroup(ctx, in.GroupId)
-		if errors.Is(err, store.ErrNotFound) {
-			return Ack{}, errcode.ErrGroupNotFound
-		} else if err != nil {
-			return Ack{}, errcode.ErrStoreFailed.Wrap(err)
-		}
-		in.RecvId = ""
-		in.GroupId = g.Id
-		conversationId = conv.Group(in.GroupId)
+	conversationId, group, err := s.normalizeDestination(ctx, &in)
+	if err != nil {
+		return Ack{}, err
 	}
 
-	// Fast path: same (conversation, sender, client_msg_id) already committed. It runs before the
-	// rate limit so a retry for a lost ACK always gets the original ACK (design §5.4).
+	// A retry always gets the committed ACK; only its republish is authorized and consumes send quota.
 	if m, err := s.store.GetMessageByClientId(ctx, conversationId, in.SenderId, in.ClientMsgId); err == nil {
+		if s.republishAllowed(ctx, in, group) {
+			if in.Unlimited || s.sendLimit.Allow(in.SenderId, s.now()) {
+				s.republish(ctx, *m, in.SenderConnId)
+			}
+		}
 		return ack(*m), nil
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return Ack{}, errcode.ErrStoreFailed.Wrap(err)
 	}
 	now := s.now()
 	// Limit on arrival time; a future persisted timestamp must not refill the bucket.
-	if limit := s.sendLimit.Load(); !in.Unlimited && limit != nil && !limit.Allow(in.SenderId, now) {
+	if !in.Unlimited && !s.sendLimit.Allow(in.SenderId, now) {
 		return Ack{}, errcode.ErrTooManyRequests.WithMessage("message send rate limit")
 	}
 
@@ -179,7 +155,7 @@ func (s *Service) Send(ctx context.Context, in SendInput) (Ack, error) {
 		RecvId: in.RecvId, GroupId: in.GroupId, SessionType: in.SessionType, ContentType: in.ContentType, Content: in.Content,
 	}
 	var duplicate bool
-	err := s.store.WithTx(ctx, func(tx Tx) error {
+	err = s.store.WithTx(ctx, func(tx Tx) error {
 		c, err := tx.LockConversation(ctx, conversationId, in.SessionType, in.GroupId, now)
 		if err != nil {
 			return err
@@ -216,38 +192,110 @@ func (s *Service) Send(ctx context.Context, in SendInput) (Ack, error) {
 		} else if err != nil {
 			return Ack{}, errcode.ErrStoreFailed.Wrap(err)
 		}
+		// This request already consumed its send quota before entering the transaction.
+		s.republish(ctx, *m, in.SenderConnId)
 		return ack(*m), nil
 	case err != nil:
 		return Ack{}, errcode.Or(err, errcode.ErrMessageSendFailed)
 	}
 
-	ev := PushEvent{
-		ConversationId: conversationId, SessionType: in.SessionType, SenderId: in.SenderId, SenderConnId: in.SenderConnId,
-		RecvId: in.RecvId, GroupId: in.GroupId, Message: FromStore(msg),
-	}
-	// The message is committed, so the push must not die with the request; bounded so a stuck bus
-	// cannot hold the handler open either.
-	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), publishTimeout)
-	defer cancel()
-	s.pub.Publish(pctx, ev)
-	if s.push.Load() != nil {
+	ev := s.publish(ctx, msg, in.SenderConnId)
+	if s.pusher != nil {
 		// Only the sending node, only for a newly committed message, in the background.
 		s.spawnOfflinePush(context.WithoutCancel(ctx), ev)
 	}
 	return ack(msg), nil
 }
 
+// Use the stored spelling for routing and discard the other session type's unvalidated field
+// before the idempotency lookup, transaction and push can observe it. Send validates the type first.
+// The group row read here is handed back so republishAllowed does not read it a second time; it is
+// nil for a single chat.
+func (s *Service) normalizeDestination(ctx context.Context, in *SendInput) (string, *store.Group, error) {
+	if in.SessionType == store.ConversationSingle {
+		u, err := s.store.GetUser(ctx, in.RecvId)
+		if errors.Is(err, store.ErrNotFound) {
+			return "", nil, errcode.ErrUserNotFound
+		}
+		if err != nil {
+			return "", nil, errcode.ErrStoreFailed.Wrap(err)
+		}
+		in.RecvId, in.GroupId = u.Id, ""
+		return conv.Single(in.SenderId, in.RecvId), nil, nil
+	}
+	g, err := s.store.GetGroup(ctx, in.GroupId)
+	if errors.Is(err, store.ErrNotFound) {
+		return "", nil, errcode.ErrGroupNotFound
+	}
+	if err != nil {
+		return "", nil, errcode.ErrStoreFailed.Wrap(err)
+	}
+	in.GroupId, in.RecvId = g.Id, ""
+	return conv.Group(in.GroupId), g, nil
+}
+
+// republishAllowed re-checks a group sender before an idempotent hit publishes the stored message
+// again, so someone removed from the group cannot keep fanning out to it by retrying (design §8.4).
+// It runs before the quota check, so a denied republish costs no quota, and outside the conversation
+// row lock, so a removal racing a retry can still let one event through; recipients drop it by
+// (conversation_id, seq). g is the row normalizeDestination read microseconds earlier in this same
+// request: §8.4 already concedes this re-check races a concurrent departure, so re-reading the group
+// would buy no freshness and only doubles the group-table read rate under a retry storm — the
+// membership row is still read now. A store failure denies the republish; the committed ACK is
+// returned either way.
+func (s *Service) republishAllowed(ctx context.Context, in SendInput, g *store.Group) bool {
+	if in.SessionType != store.ConversationGroup {
+		return true
+	}
+	switch err := s.checkGroupSend(ctx, s.store, g, in.SenderId); {
+	case err == nil:
+		return true
+	case errors.Is(err, errcode.ErrNotGroupMember), errors.Is(err, errcode.ErrGroupDismissed):
+		return false
+	default:
+		log.CtxError(ctx, "republish membership group=%s sender=%s: %v",
+			in.GroupId, in.SenderId, errcode.ErrStoreFailed.Wrap(err))
+		return false
+	}
+}
+
+func (s *Service) republish(ctx context.Context, msg store.Message, senderConnId string) {
+	s.republished.Add(1)
+	s.publish(ctx, msg, senderConnId)
+}
+
+func (s *Service) publish(ctx context.Context, msg store.Message, senderConnId string) PushEvent {
+	ev := PushEvent{
+		ConversationId: msg.ConversationId, SessionType: msg.SessionType, SenderId: msg.SenderId,
+		SenderConnId: senderConnId, RecvId: msg.RecvId, GroupId: msg.GroupId, Message: FromStore(msg),
+	}
+	// The message is committed, so the push must not die with the request; bounded so a stuck bus
+	// cannot hold the handler open either.
+	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), publishTimeout)
+	defer cancel()
+	s.pub.Publish(pctx, ev)
+	return ev
+}
+
 var errRollback = errors.New("message: rollback")
 
+// checkMembership loads the group inside the caller's transaction, which for Send means under the
+// conversation row lock: §8.4 closes the "kicked after the check" window only if this read is that
+// fresh, so it must not be replaced by a row read before the lock.
 func (s *Service) checkMembership(ctx context.Context, tx Tx, groupId, userId string) error {
 	g, err := tx.GetGroup(ctx, groupId)
 	if err != nil {
 		return err
 	}
+	return s.checkGroupSend(ctx, tx, g, userId)
+}
+
+// checkGroupSend applies §8.4 step 3b's condition to an already-loaded chat_groups row.
+func (s *Service) checkGroupSend(ctx context.Context, tx Tx, g *store.Group, userId string) error {
 	if g.Status == store.GroupStatusDismissed {
 		return errcode.ErrGroupDismissed
 	}
-	if _, err := tx.GetGroupMember(ctx, groupId, userId); errors.Is(err, store.ErrNotFound) {
+	if _, err := tx.GetGroupMember(ctx, g.Id, userId); errors.Is(err, store.ErrNotFound) {
 		return errcode.ErrNotGroupMember
 	} else if err != nil {
 		return err
@@ -381,7 +429,7 @@ func (s *Service) Recipients(ctx context.Context, ev PushEvent) ([]string, error
 	if ev.SessionType == store.ConversationSingle {
 		return []string{ev.SenderId, ev.RecvId}, nil
 	}
-	if ids, ok := s.members.Load().get(ev.GroupId); ok {
+	if ids, ok := s.members.get(ev.GroupId); ok {
 		return ids, nil
 	}
 	members, err := s.store.ListGroupMembers(ctx, ev.GroupId)
@@ -389,7 +437,7 @@ func (s *Service) Recipients(ctx context.Context, ev PushEvent) ([]string, error
 		return nil, errcode.ErrStoreFailed.Wrap(err)
 	}
 	ids := lo.Map(members, func(m store.GroupMember, _ int) string { return m.UserId })
-	s.members.Load().set(ev.GroupId, ids)
+	s.members.set(ev.GroupId, ids)
 	return ids, nil
 }
 

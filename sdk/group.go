@@ -50,6 +50,10 @@ func (c *Client) InternalJoinGroup(ctx context.Context, groupId string, opts ...
 	return c.internalPost(ctx, "/internal/group/join", groupRequest{GroupId: groupId}, nil, opts)
 }
 
+func (c *Client) InternalQuitGroup(ctx context.Context, groupId string, opts ...RequestOption) error {
+	return c.internalPost(ctx, "/internal/group/quit", groupRequest{GroupId: groupId}, nil, opts)
+}
+
 func (c *Client) InternalKickGroupMember(ctx context.Context, groupId, userId string, opts ...RequestOption) error {
 	return c.internalPost(ctx, "/internal/group/kick", groupRequest{GroupId: groupId, UserId: userId}, nil, opts)
 }

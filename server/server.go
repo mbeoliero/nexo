@@ -30,20 +30,18 @@ const (
 type Option func(*options)
 
 type options struct {
-	app     []app.Option
-	prefix  string
-	dbSet   bool
-	authSet bool
+	deps   app.Dependencies
+	prefix string
 }
 
 func WithOfflinePusher(p Pusher) Option {
-	return func(o *options) { o.app = append(o.app, app.WithOfflinePusher(p)) }
+	return func(o *options) { o.deps.Pusher = p }
 }
 
 // WithAuthenticator replaces the configured provider chain for Bearer and the WS handshake;
 // auth.providers may then be empty (design §15.2).
 func WithAuthenticator(a Authenticator) Option {
-	return func(o *options) { o.app, o.authSet = append(o.app, app.WithAuthenticator(a)), true }
+	return func(o *options) { o.deps.Auth = a }
 }
 
 // WithGormDb / WithPgxPool reuse a host-owned connection for the Store; Shutdown leaves it open.
@@ -51,11 +49,11 @@ func WithAuthenticator(a Authenticator) Option {
 // A MySQL host pool must disable CLIENT_FOUND_ROWS on every connection; otherwise duplicate
 // message inserts look successful. The configured DSN cannot validate an injected pool.
 func WithGormDb(db *gorm.DB) Option {
-	return func(o *options) { o.app, o.dbSet = append(o.app, app.WithGormDb(db)), true }
+	return func(o *options) { o.deps.GormDb = db }
 }
 
 func WithPgxPool(p *pgxpool.Pool) Option {
-	return func(o *options) { o.app, o.dbSet = append(o.app, app.WithPgxPool(p)), true }
+	return func(o *options) { o.deps.Pool = p }
 }
 
 // WithRoutePrefix mounts under e.g. "/im": /im/api/v1/**, /im/ws, /im/healthz. Internal HMAC
@@ -82,12 +80,12 @@ func New(ctx context.Context, cfg *Config, opts ...Option) (*Server, error) {
 	for _, opt := range opts {
 		opt(&o)
 	}
-	cfg.Db.Injected = o.dbSet
-	cfg.Auth.Injected = o.authSet
+	cfg.Db.Injected = o.deps.GormDb != nil || o.deps.Pool != nil
+	cfg.Auth.Injected = o.deps.Auth != nil
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	a, err := app.Build(ctx, cfg, o.app...)
+	a, err := app.Build(ctx, cfg, o.deps)
 	if err != nil {
 		return nil, fmt.Errorf("server: %w", err)
 	}
@@ -118,7 +116,7 @@ func (s *Server) User() *UserService                 { return s.app.Deps().User 
 func (s *Server) Group() *GroupService               { return s.app.Deps().Group }
 func (s *Server) Message() *MessageService           { return s.app.Deps().Message }
 func (s *Server) Conversation() *ConversationService { return s.app.Deps().Conv }
-func (s *Server) Stats() GatewayStats                { return s.app.Gateway().Stats() }
+func (s *Server) Stats() GatewayStats                { return s.app.Stats() }
 
 // Kick closes this node's connections of userId on platformId except keepTokenId; multi-node
 // kicks go through the Bus when a new login happens.

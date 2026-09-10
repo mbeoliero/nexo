@@ -70,13 +70,20 @@ func TestEmbedded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ack, err := s.Message().Send(t.Context(), SendInput{SenderId: alice.Id, RecvId: bob.Id, SessionType: 1, ContentType: 1,
-		ClientMsgId: "c-" + suffix, Content: `{"text":"hi"}`, Unlimited: true})
+	in := SendInput{SenderId: alice.Id, RecvId: bob.Id, SessionType: 1, ContentType: 1,
+		ClientMsgId: "c-" + suffix, Content: `{"text":"hi"}`, Unlimited: true}
+	ack, err := s.Message().Send(t.Context(), in)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if ack.Seq != 1 {
 		t.Fatalf("seq = %d, want 1", ack.Seq)
+	}
+	if retry, err := s.Message().Send(t.Context(), in); err != nil || retry != ack {
+		t.Fatalf("embedded retry: ack=%+v err=%v", retry, err)
+	}
+	if stats := s.Stats(); stats.MessageRepublishAttempts != 1 {
+		t.Fatalf("public stats omitted the service counter: %+v", stats)
 	}
 	sess, err := s.User().Login(t.Context(), "bob"+suffix, "pw123456", 5)
 	if err != nil {

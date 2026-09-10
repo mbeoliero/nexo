@@ -15,7 +15,7 @@ import (
 
 func TestStore(t *testing.T) {
 	s := New(storetest.NewMem(), 60*time.Second)
-	onlinetest.Run(t, s, func(now func() time.Time) { s.now = now }, onlinetest.Opts{})
+	onlinetest.Run(t, s, func(now func() time.Time) { s.now = now }, onlinetest.Opts{Reviveless: true})
 }
 
 type chunkRecorder struct {
@@ -39,8 +39,13 @@ func TestRenewChunksLargeBatches(t *testing.T) {
 	for i := range conns {
 		conns[i] = onlinestore.ConnRef{ConnId: strconv.Itoa(i), UserId: "u___1", PlatformId: 1}
 	}
-	if err := s.Renew(t.Context(), "n1", conns); err != nil {
+	revived, err := s.Renew(t.Context(), "n1", conns)
+	if err != nil {
 		t.Fatal(err)
+	}
+	// An UPDATE cannot create a row, so this driver never claims to have restored one.
+	if revived != nil {
+		t.Fatalf("renew reported %v as revived; an UPDATE cannot create a registration", revived)
 	}
 	if got := []int{len(rec.batches), len(rec.batches[0]), len(rec.batches[1]), len(rec.batches[2])}; !slices.Equal(got, []int{3, 500, 500, 200}) {
 		t.Fatalf("chunks = %v, want [3 500 500 200]", got)

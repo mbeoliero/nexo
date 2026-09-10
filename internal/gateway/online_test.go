@@ -39,11 +39,11 @@ func (f *fakeOnline) Remove(ctx context.Context, _ string, c onlinestore.ConnRef
 	return nil
 }
 
-func (f *fakeOnline) Renew(_ context.Context, _ string, conns []onlinestore.ConnRef) error {
+func (f *fakeOnline) Renew(_ context.Context, _ string, conns []onlinestore.ConnRef) ([]onlinestore.ConnRef, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.renewed = append(f.renewed, conns)
-	return nil
+	return nil, nil
 }
 
 func (f *fakeOnline) Online(context.Context, []string) (map[string][]int, error) { return nil, nil }
@@ -93,8 +93,7 @@ func TestOnlineStoreLifecycle(t *testing.T) {
 }
 
 func TestGroupChangedInvalidatesMemberCache(t *testing.T) {
-	g, groups := newPushGateway(t)
-	g.deps.Message.SetMemberCacheTtl(time.Hour)
+	g, groups := newPushGateway(t, time.Hour)
 	info, err := groups.Create(t.Context(), "u___1", group.CreateInput{Name: "g", MemberIds: []string{"u___2"}})
 	if err != nil {
 		t.Fatal(err)

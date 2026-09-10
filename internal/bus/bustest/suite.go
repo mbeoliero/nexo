@@ -2,10 +2,12 @@ package bustest
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/mbeoliero/nexo/errcode"
 	"github.com/mbeoliero/nexo/internal/bus"
 )
 
@@ -29,8 +31,13 @@ func Run(t *testing.T, newBus func(t *testing.T) bus.Bus) {
 	}
 	a, b := subscribe("a"), subscribe("b")
 	want := bus.Event{Type: bus.TypePush, NodeId: "n1", Payload: []byte(`{"conversation_id":"c","seq":7,"msg":{"content":"{\"text\":\"hi\"}"}}`)}
+	// Publish's nil means "no failure detected", not proof of delivery; with two live
+	// subscribers no driver may raise the known-failure signal (design §6.1).
 	if err := pub.Publish(ctx, want); err != nil {
-		t.Fatal(err)
+		if errors.Is(err, errcode.ErrBusFailed) {
+			t.Fatalf("known-failure signal with two live subscribers: %v", err)
+		}
+		t.Fatalf("publish: %v", err)
 	}
 	for name, ch := range map[string]<-chan bus.Event{"a": a, "b": b} {
 		select {
@@ -54,6 +61,11 @@ func Run(t *testing.T, newBus func(t *testing.T) bus.Bus) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("big event lost")
+	}
+	// Nothing degraded, so the count is zero whichever way the driver answers; the availability
+	// flag itself is driver-specific and is asserted in each driver's own test (design §6.1).
+	if n, ok := pub.DegradedPublishes(); n != 0 {
+		t.Fatalf("degraded publishes after healthy delivery: n=%d available=%v", n, ok)
 	}
 }
 

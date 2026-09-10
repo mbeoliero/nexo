@@ -59,9 +59,9 @@ func newServer(t *testing.T) *httptest.Server {
 	api.Register(e, "/im", cfg, api.Deps{
 		Auth: auth.Chain{native}, NativeLogin: true,
 		Internal: auth.NewInternal([]string{"hmac-secret"}, []string{"platform"}, 300*time.Second, c),
-		User:     user.New(m, native),
+		User:     user.New(m, native, nil),
 		Group:    group.New(group.Adapt(m), group.NoopNotifier{}, 10),
-		Message:  message.New(message.Adapt(m), message.NoopPublisher{}, 8192),
+		Message:  message.New(message.Adapt(m), message.NoopPublisher{}, message.Config{MaxContentBytes: 8192}),
 		Conv:     conversation.New(m, conversation.NoopNotifier{}),
 	})
 	srv := httptest.NewServer(hertzHandler(e))
@@ -230,6 +230,18 @@ func TestInternalChannel(t *testing.T) {
 	}
 	g, err := pf.InternalCreateGroup(ctx, sdk.CreateGroupRequest{Name: "pg"}, sdk.AsUser("u___1"))
 	noErr(t, err)
+	if err := pf.InternalJoinGroup(ctx, g.GroupId, sdk.AsUser("u___2")); err != nil {
+		t.Fatal(err)
+	}
+	if err := pf.InternalQuitGroup(ctx, g.GroupId); sdk.CodeOf(err) != errcode.ErrInvalidParam.Code {
+		t.Fatalf("internal quit without as-user identity: %v", err)
+	}
+	if err := pf.InternalQuitGroup(ctx, g.GroupId, sdk.AsUser("u___2")); err != nil {
+		t.Fatal(err)
+	}
+	if err := pf.InternalKickGroupMember(ctx, g.GroupId, "u___2", sdk.AsUser("u___1")); sdk.CodeOf(err) != errcode.ErrNotGroupMember.Code {
+		t.Fatalf("internal quit must remove the member: %v", err)
+	}
 	if err := pf.InternalJoinGroup(ctx, g.GroupId, sdk.AsUser("u___2")); err != nil {
 		t.Fatal(err)
 	}

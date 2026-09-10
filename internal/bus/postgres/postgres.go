@@ -40,6 +40,10 @@ func New(ctx context.Context, dsn string) (*Bus, error) {
 
 func (b *Bus) Close() { b.pool.Close() }
 
+// PG NOTIFY has no receiver signal, so this driver reports unavailable rather than a zero
+// that would be indistinguishable from a bus that never dropped anything (design §6.1).
+func (*Bus) DegradedPublishes() (int64, bool) { return 0, false }
+
 func (b *Bus) Publish(ctx context.Context, ev bus.Event) error {
 	raw, err := json.Marshal(ev)
 	if err != nil {

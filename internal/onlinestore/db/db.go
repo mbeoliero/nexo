@@ -36,16 +36,19 @@ func (s *Store) Remove(ctx context.Context, _ string, c onlinestore.ConnRef) err
 const renewChunk = 500
 
 // Renew stamps one heartbeat time across every chunk, so a slow batch cannot make the last
-// connections look fresher than the first.
-func (s *Store) Renew(ctx context.Context, nodeId string, conns []onlinestore.ConnRef) error {
+// connections look fresher than the first. It revives nothing: the statement only touches rows that
+// already exist, so this driver can never restore a registration the gateway would have to announce.
+// A row whose heartbeat had aged past ttl does come back with it, which the UPDATE cannot report;
+// §7.4's periodic snapshot covers that.
+func (s *Store) Renew(ctx context.Context, nodeId string, conns []onlinestore.ConnRef) ([]onlinestore.ConnRef, error) {
 	ids := lo.Map(conns, func(c onlinestore.ConnRef, _ int) string { return c.ConnId })
 	now := s.now()
 	for chunk := range slices.Chunk(ids, renewChunk) {
 		if err := s.st.RenewOnlineConns(ctx, nodeId, chunk, now); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	return nil
+	return nil, nil
 }
 
 func (s *Store) Online(ctx context.Context, userIds []string) (map[string][]int, error) {

@@ -92,17 +92,8 @@ func (s *Store) GetUserConversation(ctx context.Context, ownerId, conversationId
 }
 
 func (s *Store) GetUserConversationRow(ctx context.Context, ownerId, conversationId string) (*store.UserConversationRow, error) {
-	from := clause.From{
-		Tables: []clause.Table{{Name: "user_conversations", Alias: "uc"}},
-		Joins: []clause.Join{{Type: clause.InnerJoin, Table: clause.Table{Name: "conversations", Alias: "c"},
-			ON: clause.Where{Exprs: []clause.Expression{clause.Eq{
-				Column: clause.Column{Table: "c", Name: "conversation_id"},
-				Value:  clause.Column{Table: "uc", Name: "conversation_id"},
-			}}},
-		}},
-	}
-	r, err := gorm.G[ucRow](s.db, from).Select("uc.*, c.max_seq AS conv_max_seq").
-		Where("uc.owner_id = ? AND uc.conversation_id = ?", ownerId, conversationId).Take(ctx)
+	r, err := s.userConversationRows(ownerId).
+		Where("uc.conversation_id = ?", conversationId).Take(ctx)
 	if err != nil {
 		return nil, wrap(err)
 	}
@@ -133,7 +124,7 @@ func (s *Store) VisibleOwners(ctx context.Context, conversationId string, ownerI
 	if len(ownerIds) == 0 {
 		return nil, nil
 	}
-	rows, err := gorm.G[model.UserConversation](s.db).
+	rows, err := gorm.G[model.UserConversation](s.db).Select("owner_id").
 		Where("conversation_id = ? AND owner_id IN ? AND min_seq <= ? AND (max_seq = 0 OR max_seq >= ?)", conversationId, ownerIds, seq, seq).
 		Find(ctx)
 	if err != nil {
@@ -146,7 +137,9 @@ func (s *Store) MutedOwners(ctx context.Context, conversationId string, ownerIds
 	if len(ownerIds) == 0 {
 		return nil, nil
 	}
-	rows, err := gorm.G[model.UserConversation](s.db).Where("conversation_id = ? AND owner_id IN ? AND recv_msg_opt <> 0", conversationId, ownerIds).Find(ctx)
+	rows, err := gorm.G[model.UserConversation](s.db).Select("owner_id").
+		Where("conversation_id = ? AND owner_id IN ? AND recv_msg_opt <> 0", conversationId, ownerIds).
+		Find(ctx)
 	if err != nil {
 		return nil, wrap(err)
 	}

@@ -203,7 +203,7 @@ func (m *Mem) SetUserConversationMaxSeq(_ context.Context, ownerId, conversation
 	return nil
 }
 
-// Test hooks to shape state the service cannot reach yet (seq allocation lands in phase 4).
+// Test hooks to construct boundary states without replaying every preceding service operation.
 func (m *Mem) SetConversation(c store.Conversation) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

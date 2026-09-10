@@ -118,7 +118,8 @@ func health(_ context.Context, c *app.RequestContext) {
 
 const readyTimeout = 2 * time.Second
 
-// healthz is the LB probe (design §12): 503 while the DB cannot be pinged so traffic drains off this node.
+// healthz is the LB probe (docs/integration.md#public-routes): 503 while the DB cannot be pinged so
+// traffic drains off this node.
 func healthz(nodeId string, ready func(context.Context) error) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		if ready != nil {

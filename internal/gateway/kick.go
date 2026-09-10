@@ -17,7 +17,6 @@ const (
 
 // Kick closes this node's connections for user+platform that hold a different token,
 // after pushing 2002 (design §8.2). A same-token reconnect keeps the old connection.
-// Phase 6 calls this from the Bus subscriber as well.
 func (g *Gateway) Kick(userId string, platformId int, keepTokenId string) {
 	g.kick(context.Background(), userId, platformId, keepTokenId)
 }
@@ -69,6 +68,7 @@ func (c *Client) beginDrain() bool {
 }
 
 func (c *Client) finishDrain(last []byte) {
+	c.gw.removeOnlineSubscriptions(c)
 	timer := time.AfterFunc(writeWait, func() { c.Close(closeReasonKick) })
 	context.AfterFunc(c.ctx(), func() { timer.Stop() })
 	if last != nil {

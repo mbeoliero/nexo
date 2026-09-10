@@ -84,3 +84,11 @@ func namedDsn(t *testing.T, dsn, name string) string {
 	}
 	return cfg.ConnString()
 }
+
+// design §6.1: PG NOTIFY has no receiver signal, so the counter is unavailable, never 0/true.
+func TestDegradedPublishesUnavailable(t *testing.T) {
+	t.Parallel()
+	if n, ok := (&Bus{}).DegradedPublishes(); ok || n != 0 {
+		t.Fatalf("got n=%d ok=%v, want 0/false", n, ok)
+	}
+}

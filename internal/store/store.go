@@ -157,7 +157,7 @@ type ConversationStore interface {
 	GetUserConversationRow(ctx context.Context, ownerId, conversationId string) (*UserConversationRow, error)
 	// UpsertUserConversation on conflict resets min_seq / max_seq / read_seq / updated_at (re-join semantics).
 	UpsertUserConversation(ctx context.Context, uc *UserConversation) error
-	// CreateUserConversations bulk-inserts new rows (group creation, design §12); rows must not exist.
+	// CreateUserConversations bulk-inserts new rows (group creation, design §8.5); rows must not exist.
 	CreateUserConversations(ctx context.Context, ucs []UserConversation) error
 	SetUserConversationMaxSeq(ctx context.Context, ownerId, conversationId string, maxSeq int64) error
 	DeleteUserConversation(ctx context.Context, ownerId, conversationId string) error
