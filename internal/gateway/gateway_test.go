@@ -444,3 +444,40 @@ func TestOriginChecker(t *testing.T) {
 		})
 	}
 }
+
+func TestGetConversationFrame(t *testing.T) {
+	g := newGateway(t, testConfig())
+	f := newFakeConn()
+	serve(t, g, "u___1", f)
+
+	f.in <- []byte(`{"req_id":1003,"data":{"client_msg_id":"c1","session_type":1,"recv_id":"u___2","content_type":1,"content":"{}"}}`)
+	if r := f.next(t); r.Code != 0 {
+		t.Fatalf("send: %+v", r)
+	}
+	// Both keys reach the same row, so a client filling in an uncached conversation after a 2001
+	// push stays on the socket instead of falling back to HTTP.
+	for _, data := range []string{`{"conversation_id":"si_u___1:u___2","with_last_message":true}`, `{"peer_user_id":"u___2"}`} {
+		f.in <- []byte(`{"req_id":1005,"op_id":"op-get","data":` + data + `}`)
+		r := f.next(t)
+		if r.ReqId != ReqGetConversation || r.Code != 0 || !strings.Contains(fmt.Sprint(r.Data), "conversation_id:si_u___1:u___2") {
+			t.Fatalf("%s: %+v", data, r)
+		}
+	}
+	for _, tc := range []struct {
+		data string
+		code int
+	}{
+		{data: `{"peer_user_id":"u___9"}`, code: errcode.ErrConversationNotFound.Code},
+		{data: `{}`, code: errcode.ErrInvalidParam.Code},
+		{data: `{"peer_user_id":"u___1"}`, code: errcode.ErrInvalidParam.Code},
+		{data: `{"conversation_id":"si_u___1:u___2","group_id":"g1"}`, code: errcode.ErrInvalidParam.Code},
+	} {
+		f.in <- []byte(`{"req_id":1005,"data":` + tc.data + `}`)
+		if r := f.next(t); r.Code != tc.code {
+			t.Errorf("%s: want %d, got %+v", tc.data, tc.code, r)
+		}
+	}
+	if f.isClosed() {
+		t.Fatal("errors must not close the connection")
+	}
+}

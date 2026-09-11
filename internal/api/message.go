@@ -59,6 +59,12 @@ func (h messageHandler) list(ctx context.Context, c *app.RequestContext) {
 	webx.Respond(ctx, c, res, err)
 }
 
+func (h messageHandler) get(ctx context.Context, c *app.RequestContext) {
+	key := conversation.GetKey{ConversationId: c.Query("conversation_id"), PeerUserId: c.Query("peer_user_id"), GroupId: c.Query("group_id")}
+	res, err := h.conversation.Get(ctx, webx.IdentityFrom(c).UserId, key, c.Query("with_last_message") == "true")
+	webx.Respond(ctx, c, res, err)
+}
+
 type readReq struct {
 	ConversationId string `json:"conversation_id"`
 	ReadSeq        int64  `json:"read_seq"`

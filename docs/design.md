@@ -160,7 +160,7 @@
    - 收到 push 的 `seq > 本地 max_seq + 1` → 拉取缺口；
    - 连接建立/前台恢复/收到 `Resync` 帧 → `GetMaxSeqs` 对比本地，拉取差异；
    - 收到 app push → 唤起后同上。
-8. **权限**：所有按 conversation_id 的读操作，先确认 `user_conversations(owner=当前用户, conversation_id)` 存在，否则 403。
+8. **权限**：所有按 conversation_id 的读操作，先确认 `user_conversations(owner=当前用户, conversation_id)` 存在，否则 403。唯一例外是单会话点查（§8.8），它用 `10501` 表示“尚无该会话”；该行按 owner 存储，“不存在”与“非成员”对调用方本就没有信息差。
 9. **被踢不重连**：客户端收到 `2002 KickOnline` 后不得自动重连，须重新走登录（平台 token 场景由平台决定）。否则新旧两端会互相踢成乒乓。
 10. **收件人必须存在**：`users` 无该 id → `10201`。平台用户先由平台后端 `/internal/user/upsert` 写入。
 11. **消息排序时间不回退**：发送持有会话行锁后确定本次持久化时间，不小于该会话已有 `updated_at`；并发请求交错、节点时钟偏差或回拨不能让新消息把会话排序时间写回过去。消息的 `send_time`／`created_at` 与会话 `updated_at` 共用该毫秒值；触达用户会话时以该时间更新，但保留已有更晚的排序时间（例如其他节点入群时写入的时间），不能降低个人视角的排序键。时间只保证不减，允许相等，严格顺序仍以 seq 为准；幂等重试返回原 ACK，不刷新时间。限流按请求到达时的服务时钟判定，不用被钳制的会话时间补充令牌。
@@ -457,6 +457,11 @@ Client(iOS, token T2) ──WS──► nexo2: Verify(T2) → 注册 → OnlineS
    ← 主键点查，数量受分页上限约束；visible_max < min_seq 时无 last_message。MySQL 8 与 PG 均支持行构造器 IN
 ```
 请求、响应、游标编码和置顶展示约定见 [HTTP API](integration.md#http-api)。
+
+单会话点查（HTTP `/conversation/get`、WS `1005`）是同一条 JOIN 的单行版本（`GetUserConversationRow`），
+可见范围、未读和 last_message 都按 §5.3/5.4 与列表同一套算法，不引入第二种口径。三个入口场景——推送点开、
+用户主页进私聊、收到未缓存会话的消息——只在“怎么得到 conversation_id”上不同：`peer_user_id` 由服务端按 §5.1
+推导，客户端不复制该拼接规则；`group_id` 同理。不存在返回 `10501`（§5.8）。
 
 ### 8.9 离线推送（发送节点视角）
 

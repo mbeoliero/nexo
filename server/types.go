@@ -62,5 +62,7 @@ type (
 	ConversationService = conversation.Service
 	ConversationItem    = conversation.Item
 	ConversationList    = conversation.ListResult
+	ConversationKey     = conversation.GetKey
+	ConversationResult  = conversation.GetResult
 	ConversationOpt     = conversation.Opt
 )

@@ -97,6 +97,85 @@ type ListResult struct {
 	HasMore       bool   `json:"has_more"`
 }
 
+func itemFromRow(r store.UserConversationRow) Item {
+	visibleMax := conv.VisibleMax(r.UserConversation, r.ConvMaxSeq)
+	return Item{
+		ConversationId: r.ConversationId, Type: r.Type, PeerUserId: r.PeerUserId, GroupId: r.GroupId,
+		MinSeq: r.MinSeq, MaxSeq: visibleMax, ReadSeq: r.ReadSeq, Unread: max(visibleMax-r.ReadSeq, 0),
+		RecvMsgOpt: r.RecvMsgOpt, IsPinned: r.IsPinned, Extra: r.Extra, UpdatedAt: r.UpdatedAt.UnixMilli(),
+	}
+}
+
+// lastMessageKey points at the visible max; false when the caller's visible range holds no message (§5.3).
+func (i Item) lastMessageKey() (store.MessageKey, bool) {
+	if i.MaxSeq < i.MinSeq {
+		return store.MessageKey{}, false
+	}
+	return store.MessageKey{ConversationId: i.ConversationId, Seq: i.MaxSeq}, true
+}
+
+// GetKey selects one conversation; exactly one field must be set so a request cannot name two.
+// peer_user_id and group_id keep the §5.1 id rule on the server: clients open a chat from a user
+// profile or a group entry without reproducing the ordered "si_<a>:<b>" spelling themselves.
+type GetKey struct {
+	ConversationId string `json:"conversation_id,omitempty"`
+	PeerUserId     string `json:"peer_user_id,omitempty"`
+	GroupId        string `json:"group_id,omitempty"`
+}
+
+func (k GetKey) resolve(userId string) (string, error) {
+	switch {
+	case lo.Count([]bool{k.ConversationId != "", k.PeerUserId != "", k.GroupId != ""}, true) != 1:
+		return "", errcode.ErrInvalidParam.WithMessage("exactly one of conversation_id, peer_user_id or group_id is required")
+	case k.ConversationId != "":
+		return k.ConversationId, nil
+	case k.GroupId != "":
+		return conv.Group(k.GroupId), nil
+	case k.PeerUserId == userId:
+		// Sending to yourself is rejected too, so such a row can never exist; 10001 beats a
+		// misleading "no conversation yet".
+		return "", errcode.ErrInvalidParam.WithMessage("peer_user_id must not be the caller")
+	default:
+		return conv.Single(userId, k.PeerUserId), nil
+	}
+}
+
+type GetResult struct {
+	Conversation Item `json:"conversation"`
+}
+
+// Get reads one conversation without paging List: opening a chat from a push, from a user profile, or
+// filling in a conversation the client has not cached. A missing row is ErrConversationNotFound, the
+// ordinary "no conversation yet" answer here rather than §5.8's 403.
+func (s *Service) Get(ctx context.Context, userId string, key GetKey, withLastMessage bool) (GetResult, error) {
+	conversationId, err := key.resolve(userId)
+	if err != nil {
+		return GetResult{}, err
+	}
+	row, err := s.store.GetUserConversationRow(ctx, userId, conversationId)
+	if errors.Is(err, store.ErrNotFound) {
+		return GetResult{}, errcode.ErrConversationNotFound
+	}
+	if err != nil {
+		return GetResult{}, errcode.ErrStoreFailed.Wrap(err)
+	}
+	// The row's spelling is authoritative (see MarkRead): the caller echoes this id back to the
+	// other conversation routes.
+	item := itemFromRow(*row)
+	k, ok := item.lastMessageKey()
+	if !withLastMessage || !ok {
+		return GetResult{Conversation: item}, nil
+	}
+	msgs, err := s.store.GetMessages(ctx, []store.MessageKey{k})
+	if err != nil {
+		return GetResult{}, errcode.ErrStoreFailed.Wrap(err)
+	}
+	if len(msgs) > 0 {
+		item.LastMessage = new(dto.MessageFromStore(msgs[0]))
+	}
+	return GetResult{Conversation: item}, nil
+}
+
 // List pages by updated_at desc; last_message is the visible max of each row, fetched in one batch.
 func (s *Service) List(ctx context.Context, userId, cursor string, limit, pageMax int, withLastMessage bool) (ListResult, error) {
 	rows, next, hasMore, err := conv.ListPage(ctx, s.store, userId, cursor, limit, pageMax)
@@ -106,14 +185,10 @@ func (s *Service) List(ctx context.Context, userId, cursor string, limit, pageMa
 	out := ListResult{Conversations: make([]Item, 0, len(rows)), NextCursor: next, HasMore: hasMore}
 	var keys []store.MessageKey
 	for _, r := range rows {
-		visibleMax := conv.VisibleMax(r.UserConversation, r.ConvMaxSeq)
-		out.Conversations = append(out.Conversations, Item{
-			ConversationId: r.ConversationId, Type: r.Type, PeerUserId: r.PeerUserId, GroupId: r.GroupId,
-			MinSeq: r.MinSeq, MaxSeq: visibleMax, ReadSeq: r.ReadSeq, Unread: max(visibleMax-r.ReadSeq, 0),
-			RecvMsgOpt: r.RecvMsgOpt, IsPinned: r.IsPinned, Extra: r.Extra, UpdatedAt: r.UpdatedAt.UnixMilli(),
-		})
-		if withLastMessage && visibleMax >= r.MinSeq {
-			keys = append(keys, store.MessageKey{ConversationId: r.ConversationId, Seq: visibleMax})
+		item := itemFromRow(r)
+		out.Conversations = append(out.Conversations, item)
+		if k, ok := item.lastMessageKey(); withLastMessage && ok {
+			keys = append(keys, k)
 		}
 	}
 	if len(keys) > 0 {

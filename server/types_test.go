@@ -15,7 +15,7 @@ func TestAliasesCoverServiceSignatures(t *testing.T) {
 		Profile{}, Session{}, ProfileUpdate{}, OnlineStatus{},
 		GroupInfo{}, GroupMember{}, GroupCreateInput{},
 		Message{}, Ack{}, SendInput{}, PullInput{}, PullResult{}, MaxSeqItem{}, MaxSeqsResult{}, PushEvent{},
-		ConversationItem{}, ConversationList{}, ConversationOpt{},
+		ConversationItem{}, ConversationList{}, ConversationKey{}, ConversationResult{}, ConversationOpt{},
 	} {
 		named[reflect.TypeOf(v)] = true
 	}

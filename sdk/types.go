@@ -176,6 +176,19 @@ type ConversationList struct {
 	HasMore       bool           `json:"has_more"`
 }
 
+// GetConversationRequest: set exactly one of the three lookup keys. PeerUserId and GroupId let the
+// server derive the conversation id, so clients never build the "si_<a>:<b>" spelling themselves.
+type GetConversationRequest struct {
+	ConversationId  string
+	PeerUserId      string
+	GroupId         string
+	WithLastMessage bool
+}
+
+type ConversationResult struct {
+	Conversation Conversation `json:"conversation"`
+}
+
 type ListConversationsRequest struct {
 	Cursor          string
 	Limit           int // 0 = server default

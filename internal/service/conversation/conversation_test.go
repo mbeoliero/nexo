@@ -155,3 +155,73 @@ func TestReadFanOutSurvivesRequestCancellation(t *testing.T) {
 		t.Fatal("fan-out context has no deadline")
 	}
 }
+
+func TestGet(t *testing.T) {
+	ctx := t.Context()
+	m := storetest.NewMem()
+	s := New(m, NoopNotifier{})
+	base := time.UnixMilli(1_700_000_000_000).UTC()
+	put := func(conv string, typ int32, peer string, convMax, minSeq, maxSeq, readSeq int64) {
+		m.SetConversation(store.Conversation{ConversationId: conv, Type: typ, MaxSeq: convMax, CreatedAt: base, UpdatedAt: base})
+		_ = m.UpsertUserConversation(ctx, &store.UserConversation{OwnerId: "u___1", ConversationId: conv, Type: typ, PeerUserId: peer, MinSeq: minSeq, MaxSeq: maxSeq, ReadSeq: readSeq, UpdatedAt: base})
+		for seq := int64(1); seq <= convMax; seq++ {
+			_, _ = m.InsertMessage(ctx, &store.Message{ConversationId: conv, Seq: seq, ServerMsgId: conv + "#" + strconv.FormatInt(seq, 10), ClientMsgId: strconv.FormatInt(seq, 10), SenderId: "u___2", SessionType: typ, ContentType: 1, Content: `{}`, SendTime: base, CreatedAt: base})
+		}
+	}
+	put("sg_g1", 2, "", 10, 1, 0, 4)              // unread 6, last = 10
+	put("si_u___1:u___2", 1, "u___2", 3, 1, 0, 3) // single chat with u___2
+	put("sg_left", 2, "", 10, 1, 6, 6)            // frozen at 6: last message must respect it
+	put("sg_late", 2, "", 10, 12, 0, 10)          // joined after everything: no last message
+
+	// The three lookup keys reach the same rows the list would return.
+	for _, tc := range []struct {
+		name   string
+		key    GetKey
+		wantId string
+		unread int64
+		last   int64
+	}{
+		{name: "by conversation id", key: GetKey{ConversationId: "sg_g1"}, wantId: "sg_g1", unread: 6, last: 10},
+		{name: "by group id", key: GetKey{GroupId: "g1"}, wantId: "sg_g1", unread: 6, last: 10},
+		{name: "by peer user id", key: GetKey{PeerUserId: "u___2"}, wantId: "si_u___1:u___2", last: 3},
+		{name: "left member", key: GetKey{ConversationId: "sg_left"}, wantId: "sg_left", last: 6},
+		{name: "late joiner", key: GetKey{ConversationId: "sg_late"}, wantId: "sg_late"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := s.Get(ctx, "u___1", tc.key, true)
+			c := got.Conversation
+			if err != nil || c.ConversationId != tc.wantId || c.Unread != tc.unread {
+				t.Fatalf("get: %+v %v", c, err)
+			}
+			if tc.last == 0 {
+				if c.LastMessage != nil {
+					t.Fatalf("empty visible range must omit last_message: %+v", c.LastMessage)
+				}
+				return
+			}
+			if c.LastMessage == nil || c.LastMessage.Seq != tc.last {
+				t.Fatalf("last_message: %+v", c.LastMessage)
+			}
+		})
+	}
+
+	if got, err := s.Get(ctx, "u___1", GetKey{ConversationId: "sg_g1"}, false); err != nil || got.Conversation.LastMessage != nil {
+		t.Fatalf("with_last_message=false must omit last_message: %+v %v", got.Conversation, err)
+	}
+
+	// A caller with no row cannot tell "never chatted" from "not a member", and neither can 10501.
+	for _, key := range []GetKey{{ConversationId: "sg_stranger"}, {GroupId: "stranger"}, {PeerUserId: "u___9"}} {
+		if _, err := s.Get(ctx, "u___1", key, true); !errors.Is(err, errcode.ErrConversationNotFound) {
+			t.Errorf("%+v: %v", key, err)
+		}
+	}
+	if _, err := s.Get(ctx, "u___9", GetKey{ConversationId: "sg_g1"}, true); !errors.Is(err, errcode.ErrConversationNotFound) {
+		t.Errorf("non-member: %v", err)
+	}
+
+	for _, key := range []GetKey{{}, {ConversationId: "sg_g1", GroupId: "g1"}, {ConversationId: "sg_g1", PeerUserId: "u___2"}, {PeerUserId: "u___1"}} {
+		if _, err := s.Get(ctx, "u___1", key, true); !errors.Is(err, errcode.ErrInvalidParam) {
+			t.Errorf("%+v: %v", key, err)
+		}
+	}
+}

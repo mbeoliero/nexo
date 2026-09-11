@@ -25,6 +25,26 @@ func (c *Client) Conversations(ctx context.Context, req ListConversationsRequest
 	return r, c.get(ctx, "/conversation/list", listQuery(req), &r)
 }
 
+func getQuery(req GetConversationRequest) url.Values {
+	q := url.Values{}
+	for k, v := range map[string]string{"conversation_id": req.ConversationId, "peer_user_id": req.PeerUserId, "group_id": req.GroupId} {
+		if v != "" {
+			q.Set(k, v)
+		}
+	}
+	if req.WithLastMessage {
+		q.Set("with_last_message", "true")
+	}
+	return q
+}
+
+// Conversation reads one conversation without paging Conversations. A caller with no such
+// conversation gets error code 10501; that is the normal "not started yet" answer, not a failure.
+func (c *Client) Conversation(ctx context.Context, req GetConversationRequest) (ConversationResult, error) {
+	var r ConversationResult
+	return r, c.get(ctx, "/conversation/get", getQuery(req), &r)
+}
+
 // MarkRead returns the effective read_seq (never moves backwards).
 func (c *Client) MarkRead(ctx context.Context, conversationId string, readSeq int64) (int64, error) {
 	var out struct {
@@ -40,6 +60,11 @@ func (c *Client) SetConversationOpt(ctx context.Context, conversationId string, 
 		ConversationOpt
 	}
 	return c.put(ctx, "/conversation/opt", body{ConversationId: conversationId, ConversationOpt: opt}, nil)
+}
+
+func (c *Client) InternalConversation(ctx context.Context, req GetConversationRequest, opts ...RequestOption) (ConversationResult, error) {
+	var r ConversationResult
+	return r, c.internalGet(ctx, "/internal/conversation/get", getQuery(req), &r, opts)
 }
 
 func (c *Client) InternalConversations(ctx context.Context, req ListConversationsRequest, opts ...RequestOption) (ConversationList, error) {

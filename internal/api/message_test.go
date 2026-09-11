@@ -70,3 +70,41 @@ func TestMessageAndConversationFlow(t *testing.T) {
 		t.Fatalf("platform sender should see its own message unread: %+v", list)
 	}
 }
+
+func TestConversationGet(t *testing.T) {
+	e, token := newEngine(t, engineOptions{chat: true})
+	get := func(query, tok string) envelope {
+		_, env := call(t, e, "GET", "/api/v1/conversation/get?"+query, "", tok)
+		return env
+	}
+	_, env := call(t, e, "POST", "/api/v1/message/send", `{"client_msg_id":"c1","session_type":1,"recv_id":"u___2","content_type":1,"content":"{\"text\":\"hi\"}"}`, token(1))
+	var ack message.Ack
+	if env.Code != 0 || json.Unmarshal(env.Data, &ack) != nil {
+		t.Fatalf("send: %+v", env)
+	}
+	// Opening the chat from a push and from the peer's profile must land on the same row.
+	for _, q := range []string{"conversation_id=" + ack.ConversationId, "peer_user_id=u___2"} {
+		env := get(q+"&with_last_message=true", token(1))
+		if env.Code != 0 || !strings.Contains(string(env.Data), `"conversation_id":"`+ack.ConversationId+`"`) || !strings.Contains(string(env.Data), `"last_message"`) {
+			t.Fatalf("%s: %+v", q, env)
+		}
+	}
+	if env := get("conversation_id="+ack.ConversationId, token(1)); strings.Contains(string(env.Data), `"last_message"`) {
+		t.Fatalf("with_last_message omitted: %+v", env)
+	}
+	if env := get("peer_user_id=u___3", token(1)); env.Code != errcode.ErrConversationNotFound.Code {
+		t.Fatalf("never chatted: %+v", env)
+	}
+	if env := get("conversation_id="+ack.ConversationId, token(3)); env.Code != errcode.ErrConversationNotFound.Code {
+		t.Fatalf("non-member: %+v", env)
+	}
+	for _, q := range []string{"", "peer_user_id=u___1", "conversation_id=" + ack.ConversationId + "&peer_user_id=u___2"} {
+		if env := get(q, token(1)); env.Code != errcode.ErrInvalidParam.Code {
+			t.Fatalf("%q: %+v", q, env)
+		}
+	}
+	_, env = signedCall(t, e, "secret", "GET", "/api/v1/internal/conversation/get", "peer_user_id=u___2", "", ut.Header{Key: "X-User-Id", Value: "u___1"})
+	if env.Code != 0 || !strings.Contains(string(env.Data), ack.ConversationId) {
+		t.Fatalf("internal get: %+v", env)
+	}
+}

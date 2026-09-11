@@ -92,6 +92,7 @@ func registerRoutes(root *route.RouterGroup, cfg *config.Config, d Deps, trusted
 	authed.GET("/message/pull", msg.pull)
 	authed.GET("/message/max_seqs", msg.maxSeqs)
 	authed.GET("/conversation/list", msg.list)
+	authed.GET("/conversation/get", msg.get)
 	authed.POST("/conversation/read", msg.read)
 	authed.PUT("/conversation/opt", msg.opt)
 
@@ -109,6 +110,7 @@ func registerRoutes(root *route.RouterGroup, cfg *config.Config, d Deps, trusted
 		asUser.POST("/group/kick", g.kick)
 		asUser.POST("/message/send", msg.send)
 		asUser.GET("/conversation/list", msg.list)
+		asUser.GET("/conversation/get", msg.get)
 	}
 }
 

@@ -29,6 +29,7 @@ carry `X-Platform-Id`. Native register/login/logout are available only when `aut
 | GET | /message/pull | same range / result as WS 1002 |
 | GET | /message/max_seqs | same cursor / result as WS 1001 |
 | GET | /conversation/list | cursor, limit≤100, with_last_message |
+| GET | /conversation/get | conversation_id \| peer_user_id \| group_id, with_last_message |
 | POST | /conversation/read | same input / result as WS 1004 |
 | PUT | /conversation/opt | recv_msg_opt, is_pinned |
 
@@ -38,6 +39,16 @@ The cursor is unpadded base64url of `<updated_at in Unix milliseconds>:<conversa
 the caller's visible range and is absent when that range is empty. `is_pinned` is stored but does not affect
 server ordering; clients may move pinned entries within the pages they have loaded. Query mechanics are
 in [design §8.8](design.md#88-会话列表服务端排序--服务端返回-last_message).
+
+`/conversation/get` (WS `1005`) answers with one entry of that same shape, as `{conversation:{…}}`, so a
+client opening a chat from a push, a user profile or an uncached message never pages the list. Exactly one
+lookup key is required: `conversation_id`, `peer_user_id` (the server derives the single-chat id from
+[design §5.1](design.md#5-核心约定)) or `group_id`. Passing none, more than one, or a `peer_user_id` equal to
+the caller returns `10001`. A caller with no `user_conversations` row — never chatted, or not a member —
+gets `10501`; for this route that is the ordinary "no conversation yet" answer rather than a failure to
+show. The returned `conversation_id` is the stored spelling, which is what other routes match. A client
+that only needs the id of a chat it is about to start can skip the lookup: the `/message/send` ACK carries
+`conversation_id`, and the row is created by that send.
 
 LB health is a separate `GET /healthz` (or `<prefix>/healthz` when mounted). It requires no Bearer and
 returns top-level `status` / `node_id`, not a business envelope: HTTP 200 with `status:"ok"` when the
@@ -56,6 +67,7 @@ As-user routes additionally require `X-User-Id`; they share handlers with the pu
 | GET | /user/online_status?user_ids= | no | online platforms |
 | POST | /message/send | yes | sender = `X-User-Id`; custom messages use `content_type=100` |
 | GET | /conversation/list | yes | caller's conversations |
+| GET | /conversation/get | yes | one of the caller's conversations |
 | POST | /group/create, /group/join, /group/quit, /group/kick | yes | same business inputs as public routes; the Go SDK exposes matching Internal* methods |
 
 For `/internal/health`, callers previously reading top-level `status` must read `data.status`.
@@ -217,6 +229,7 @@ The message's `content` is itself a string containing JSON, for example
 | 1002 PullMsgBySeqRange | C→S | `{conversation_id, begin_seq, end_seq, limit≤100}` → `{messages[], has_more}` |
 | 1003 SendMsg | C→S | `{client_msg_id, session_type(1 single/2 group), recv_id \| group_id, content_type, content, sender_read=true}` → `{server_msg_id, conversation_id, seq, send_time}` |
 | 1004 MarkRead | C→S | `{conversation_id, read_seq}` → `{read_seq}` |
+| 1005 GetConversation | C→S | `{conversation_id \| peer_user_id \| group_id, with_last_message?}` → `{conversation:{…}}`; same entry and errors as `GET /conversation/get` |
 | 1006 SetOnlineSubscriptions | C→S | `{revision, user_ids}` → `{revision, snapshot_interval_ms}`; replace this connection's online-status subscription set |
 | 2001 PushMsg | S→C | full message |
 | 2002 KickOnline | S→C | `{reason: new_login \| token_expired \| over_limit}`; do not reconnect |

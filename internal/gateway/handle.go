@@ -8,6 +8,7 @@ import (
 
 	"github.com/mbeoliero/nexo/errcode"
 	"github.com/mbeoliero/nexo/internal/auth"
+	"github.com/mbeoliero/nexo/internal/service/conversation"
 	"github.com/mbeoliero/nexo/internal/service/dto"
 	"github.com/mbeoliero/nexo/internal/service/message"
 )
@@ -79,6 +80,15 @@ func (g *Gateway) handle(ctx context.Context, c *Client, req Request) (any, erro
 			return nil, err
 		}
 		return map[string]int64{"read_seq": seq}, nil
+	case ReqGetConversation:
+		var in struct {
+			conversation.GetKey
+			WithLastMessage bool `json:"with_last_message"`
+		}
+		if err := bind(req, &in); err != nil {
+			return nil, err
+		}
+		return g.deps.Conv.Get(ctx, c.UserId, in.GetKey, in.WithLastMessage)
 	default:
 		return nil, errcode.ErrInvalidProtocol.WithMessage("unknown req_id")
 	}

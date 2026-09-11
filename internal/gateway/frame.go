@@ -14,6 +14,7 @@ const (
 	ReqPullMsgBySeqRange      = 1002
 	ReqSendMsg                = 1003
 	ReqMarkRead               = 1004
+	ReqGetConversation        = 1005
 	ReqSetOnlineSubscriptions = 1006
 
 	PushMsg       = 2001
